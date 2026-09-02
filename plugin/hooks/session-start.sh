@@ -17,16 +17,13 @@ STATE="${XDG_CONFIG_HOME:-$HOME/.config}/fleet/state.json"
 
 case "$MODE" in
   off) exit 0 ;;
-  awake-on)    FLAGS="-d -i -s" ;;
+  awake-blank) FLAGS="-i -s" ;;    # system awake, display follows macOS setting
   prevent-all) FLAGS="-d -i -m -s" ;;
-  *)           FLAGS="-i -s" ;;   # awake-blank
+  *)           FLAGS="-d -i -s" ;;  # awake-on (default) — display stays on
 esac
 
 # shellcheck disable=SC2086
 nohup caffeinate $FLAGS >/dev/null 2>&1 &
 echo "{\"caffeinatePid\": $!, \"powerMode\": \"$MODE\", \"startedAt\": \"$(date -u +%FT%TZ)\", \"owner\": \"hook\"}" > "$STATE"
-
-if [ "$MODE" = "awake-blank" ]; then
-  ( sleep 2; pmset displaysleepnow ) >/dev/null 2>&1 &
-fi
+# the hook never blanks the screen — that is only ever `fleet blank` / `fleet watch`.
 exit 0

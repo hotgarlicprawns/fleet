@@ -44,8 +44,9 @@ const DEFAULT_CONFIG = {
   cwd: HOME,
   perPaneCommands: [],
   power: {
-    mode: 'awake-blank',       // awake-blank | awake-on | prevent-all | off
-    blankAfterMinutes: 0,
+    mode: 'awake-on',          // awake-on | awake-blank | prevent-all | off
+    blankAfterMinutes: 10,     // awake-blank / fleet watch: minutes idle before the
+                               // screen is allowed to blank. fleet never blanks on launch.
     releaseOnDetach: true
   },
   display: { manageArrangement: false, profileOnUp: null, profileOnDown: null },
@@ -208,13 +209,10 @@ function startPower(cfg) {
   st.caffeinatePid = child.pid; st.powerMode = mode; st.startedAt = new Date().toISOString();
   saveState(st);
   good(`power: ${c.bold(mode)} ${c.dim('(caffeinate pid ' + child.pid + ')')}`);
-  if (mode === 'awake-blank') {
-    const delay = Number(cfg.power.blankAfterMinutes) || 0;
-    if (delay > 0) {
-      info(`display blanks in ${delay} min ${c.dim('(system stays awake)')}`);
-      spawn('/bin/sh', ['-c', `sleep ${delay * 60}; pmset displaysleepnow`], { detached: true, stdio: 'ignore' }).unref();
-    } else if (delay === 0) blankDisplay();
-  }
+  // awake-blank keeps the system awake but does NOT force the display off — it
+  // simply doesn't hold the -d assertion, so macOS's own displaysleep applies.
+  // Blanking is only ever explicit: `fleet blank`, or `fleet watch` on idle.
+  if (mode === 'awake-blank') info(c.dim('display follows your macOS sleep setting; blank now with `fleet blank`'));
 }
 function stopPower() {
   const st = loadState();
@@ -292,6 +290,20 @@ function displayApply(name) {
   if (!p[name]) { fail(`no display profile "${name}"`); return; }
   const r = sh('/bin/sh', ['-c', p[name]]);
   r.status === 0 ? good(`applied display profile ${c.bold(name)}`) : fail('displayplacer failed: ' + (r.stderr || '').trim());
+}
+function displayList() {
+  checkDeps({ needDisplayplacer: true });
+  const out = sh('displayplacer', ['list']).stdout || '';
+  const blocks = out.split(/\n\n+/).filter(b => /Persistent screen id/.test(b));
+  box('displays', blocks.map(b => {
+    const id = (b.match(/Persistent screen id:\s*(\S+)/) || [])[1];
+    const type = (b.match(/Type:\s*(.+)/) || [])[1] || '';
+    const res = (b.match(/Resolution:\s*(.+)/) || [])[1] || '';
+    const main = /main display/i.test(b) ? c.warn('  ← main') : '';
+    return `${c.b((id || '?').slice(0, 8))}  ${type.padEnd(22)} ${c.dim(res)}${main}`;
+  }));
+  info(`built-in dead? save a good arrangement with the external as main, then:`);
+  info(`  ${c.c('fleet display save office')}  →  ${c.c('fleet display apply office')} after each wake`);
 }
 
 // ---------------------------------------------------------------------------
@@ -797,6 +809,7 @@ const HELP = `
     fleet power <mode>       awake-blank | awake-on | prevent-all | off
     fleet blank              blank the display now (arrangement untouched)
     fleet watch              keep awake, auto-blank when idle, wake when a session needs you
+    fleet display list       show connected displays (spot a dead built-in panel)
     fleet display save|apply <name>
 
   ${c.bold('SETUP')}
@@ -894,9 +907,10 @@ async function main() {
 
     case 'display': {
       requireMac();
-      if (sub === 'save' && rest[0]) displaySave(rest[0]);
+      if (sub === 'list') displayList();
+      else if (sub === 'save' && rest[0]) displaySave(rest[0]);
       else if (sub === 'apply' && rest[0]) displayApply(rest[0]);
-      else fail('usage: fleet display save|apply <name>');
+      else fail('usage: fleet display list | save <name> | apply <name>');
       break;
     }
 
