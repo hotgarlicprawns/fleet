@@ -22,9 +22,18 @@ brew install jq                                # optional — faster HUD
 brew install displayplacer                     # optional — display profiles
 
 fleet hud install    # wire the cost + context HUD into Claude Code
-fleet config         # panes, power mode, budget, theme
+fleet gui            # settings + status panel in your browser
+fleet config         # …or configure from the terminal
 fleet up
 ```
+
+## GUI
+
+`fleet gui` opens a local control panel (`127.0.0.1:7787`, localhost-only, no
+dependencies) to launch/tear down the grid, switch power mode, blank the
+screen, install the HUD, rename panes, and set budget thresholds — writing the
+same `~/.config/fleet/config.json`. It's also the panel a future menubar app
+wraps.
 
 Claude Code plugin (auto power-management + attention flags per session):
 
@@ -116,8 +125,22 @@ fleet license activate <key>     # public Dodo Payments endpoints, 7-day offline
 fleet license deactivate         # free the seat when switching machines
 ```
 
+## Distribution
+
+- **now** — `npm i -g @fleet/cli` + a Homebrew tap. Zero signing cost, the
+  install path devs expect, instant updates. Paid via license key.
+- **later** — a signed, notarized `.dmg` menubar app that bundles the CLI and
+  wraps `fleet gui` in a native shell. Build it once the CLI has paying users.
+
+## License
+
+- `plugin/` — MIT
+- `bin/`, `hud/`, `gui/` — commercial EULA, see [LICENSE.md](LICENSE.md).
+  14-day trial, then Free tier or a paid key. 30-day refund.
+
 ## Roadmap
 
+- Menubar `.dmg` app around `fleet gui`
 - Global summon hotkey (skhd recipe today)
 - Linux (`systemd-inhibit` + tmux)
 - WezTerm / kitty native-split backend

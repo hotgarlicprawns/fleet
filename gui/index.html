@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fleet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --ground:#f4f2ec; --panel:#fff; --panel-2:#eceae2; --ink:#1b1f26; --soft:#55606e;
+    --faint:#8b95a2; --line:#dcd9cf; --line-2:#c6c2b4; --accent:#0e9c80; --accent-ink:#0b5d4d;
+    --amber:#b9791a; --red:#c0402e; --ok:#0e9c80;
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --ground:#0c0f14; --panel:#141922; --panel-2:#1b212c; --ink:#dce1e8; --soft:#9aa4b1;
+    --faint:#6b7480; --line:#232a35; --line-2:#313a47; --accent:#5fe3c2; --accent-ink:#9defd6;
+    --amber:#e6b667; --red:#f0917d; --ok:#5fe3c2;
+  }}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ground);color:var(--ink);font:15px/1.6 "IBM Plex Sans",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  .mono{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace}
+  header{border-bottom:1px solid var(--line);padding:18px 24px;display:flex;align-items:center;gap:14px;position:sticky;top:0;background:var(--ground);z-index:5}
+  header .brand{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:16px}
+  header .brand b{color:var(--accent-ink);font-weight:600}
+  header .tier{margin-left:auto;font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
+  main{max-width:940px;margin:0 auto;padding:28px 24px 60px;display:grid;gap:22px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px 22px}
+  .card h2{font-family:"IBM Plex Mono",monospace;font-weight:500;font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);margin:0 0 16px;display:flex;align-items:center;gap:10px}
+  .card h2::before{content:"";width:18px;height:1px;background:var(--accent);flex:none}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  button{font-family:"IBM Plex Mono",monospace;font-size:12.5px;font-weight:500;padding:9px 16px;border-radius:7px;border:1px solid var(--line-2);background:transparent;color:var(--ink);cursor:pointer;transition:background .12s,border-color .12s}
+  button:hover{background:var(--panel-2)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#08110e;font-weight:600}
+  button.primary:hover{filter:brightness(1.06)}
+  button.danger:hover{border-color:var(--red);color:var(--red)}
+  button[disabled]{opacity:.4;cursor:not-allowed}
+  .seg{display:inline-flex;border:1px solid var(--line-2);border-radius:7px;overflow:hidden}
+  .seg button{border:0;border-radius:0;border-right:1px solid var(--line)}
+  .seg button:last-child{border-right:0}
+  .seg button.on{background:var(--accent);color:#08110e}
+  label{display:block;font-size:12px;color:var(--soft);margin:0 0 5px}
+  input,select{font-family:"IBM Plex Mono",monospace;font-size:13px;padding:8px 10px;border:1px solid var(--line-2);border-radius:6px;background:var(--ground);color:var(--ink);width:100%}
+  .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px}
+  .panes{display:grid;gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .pane{background:var(--panel);padding:14px 16px;display:flex;align-items:center;gap:14px}
+  .pane .dot{width:8px;height:8px;border-radius:50%;background:var(--faint);flex:none}
+  .pane.active .dot{background:var(--accent)}
+  .pane.waiting .dot{background:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 30%,transparent)}
+  .pane .nm{font-family:"IBM Plex Mono",monospace;font-weight:500;min-width:110px}
+  .pane .nm input{width:110px;padding:4px 6px;font-size:12px}
+  .pane .meta{margin-left:auto;font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--soft);display:flex;gap:14px;align-items:center}
+  .pane .cost.warn{color:var(--amber)} .pane .cost.over{color:var(--red)}
+  .bar{width:70px;height:5px;border-radius:3px;background:var(--panel-2);overflow:hidden}
+  .bar i{display:block;height:100%;background:var(--accent)}
+  .wait-tag{color:var(--accent-ink);font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+  .empty{color:var(--faint);font-size:13px;padding:8px 0}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--ground);font-family:"IBM Plex Mono",monospace;font-size:12px;padding:9px 16px;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none}
+  .toast.show{opacity:1}
+  .hint{font-size:12px;color:var(--faint);margin-top:10px}
+  .hint code{font-family:"IBM Plex Mono",monospace;background:var(--panel-2);padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand mono"><b>fleet</b> · control panel</div>
+  <div class="tier" id="tier">…</div>
+</header>
+<main>
+
+  <div class="card">
+    <h2>Session</h2>
+    <div class="row" id="sessionRow">
+      <button class="primary" id="btnUp">Launch grid</button>
+      <button class="danger" id="btnDown">Tear down</button>
+      <button id="btnNext">Jump to waiting</button>
+      <select id="tplSel" style="width:auto"><option value="">default config</option></select>
+    </div>
+    <div class="hint">Launch builds the tmux session in the background. Attach from a terminal with <code>fleet up</code> or <code>tmux attach -t fleet</code>.</div>
+    <div class="panes" id="panes" style="margin-top:16px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Power &amp; display</h2>
+    <div class="row">
+      <div class="seg" id="powerSeg">
+        <button data-mode="awake-blank">awake-blank</button>
+        <button data-mode="awake-on">awake-on</button>
+        <button data-mode="prevent-all">prevent-all</button>
+        <button data-mode="off">off</button>
+      </div>
+      <button id="btnBlank">Blank screen now</button>
+    </div>
+    <div class="hint" id="powerHint"></div>
+    <div class="grid2" style="margin-top:16px">
+      <div><label>Blank after (minutes idle, 0 = now)</label><input id="blankMin" type="number" min="0"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Cost HUD</h2>
+    <div class="row">
+      <button class="primary" id="btnHud">Install HUD</button>
+      <span class="hint" id="hudHint"></span>
+    </div>
+    <div class="grid2" style="margin-top:16px">
+      <div><label>Warn at ($ per session)</label><input id="warnUsd" type="number" step="0.5"></div>
+      <div><label>Cap / red at ($)</label><input id="capUsd" type="number" step="0.5"></div>
+      <div><label>Daily budget ($)</label><input id="dailyUsd" type="number" step="1"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Grid defaults</h2>
+    <div class="grid2">
+      <div><label>Panes (if not named below)</label><input id="paneCount" type="number" min="1" max="16"></div>
+      <div><label>Layout</label><select id="layout">
+        <option>tiled</option><option>even-horizontal</option><option>even-vertical</option><option>main-vertical</option>
+      </select></div>
+      <div><label>Command per pane</label><input id="command" type="text"></div>
+      <div><label>Start directory</label><input id="cwd" type="text"></div>
+      <div><label>Theme</label><select id="theme">
+        <option>aurora</option><option>mono</option><option>nord</option><option>solar</option>
+      </select></div>
+    </div>
+    <div class="row" style="margin-top:16px">
+      <button class="primary" id="btnSave">Save settings</button>
+      <span class="hint" id="saveHint">Named panes are edited in <code>~/.config/fleet/config.json</code>.</span>
+    </div>
+  </div>
+
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+let STATE = null, saveTimer = null;
+
+function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1800); }
+
+async function api(path, opts){ const r = await fetch(path, opts); return r.json(); }
+async function act(body){ const s = await api('/api/action',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}); if(s.error){toast(s.error);return;} STATE=s; render(); }
+
+async function refresh(){ try{ STATE = await api('/api/state'); render(); }catch(e){} }
+
+function render(){
+  if(!STATE) return;
+  const c = STATE.config;
+  const e = STATE.entitlement;
+  $('#tier').textContent = e.kind==='pro' ? 'Pro' : e.kind==='trial' ? `Trial · ${e.daysLeft} days` : `Free · 3 panes`;
+
+  // session
+  $('#btnUp').disabled = STATE.running;
+  $('#btnDown').disabled = !STATE.running;
+  $('#btnNext').disabled = !STATE.running || !STATE.panes.some(p=>p.attention);
+  const tpl = $('#tplSel');
+  if(tpl.options.length === 1) STATE.templates.forEach(t=>tpl.add(new Option('template: '+t, t)));
+
+  const pc = $('#panes');
+  if(!STATE.panes.length){ pc.innerHTML = '<div class="pane"><span class="empty">no session running — Launch above</span></div>'; }
+  else pc.innerHTML = STATE.panes.map(p=>{
+    const cls = p.attention ? 'waiting' : p.active ? 'active' : '';
+    const costcls = p.costUsd>=(c.budget.capUsd||1e9)?'over':p.costUsd>=(c.budget.warnUsd||1e9)?'warn':'';
+    return `<div class="pane ${cls}">
+      <span class="dot"></span>
+      <span class="nm"><input value="${p.name.replace(/"/g,'&quot;')}" data-idx="${p.idx}" class="rename"></span>
+      <span class="meta">
+        ${p.attention?'<span class="wait-tag">waiting</span>':''}
+        ${p.model?`<span>${p.model}</span>`:''}
+        ${p.costUsd?`<span class="cost ${costcls}">$${p.costUsd.toFixed(2)}</span>`:''}
+        ${p.ctxPct?`<span class="bar"><i style="width:${Math.min(100,p.ctxPct)}%"></i></span><span>${p.ctxPct}%</span>`:''}
+      </span>
+    </div>`;
+  }).join('');
+  pc.querySelectorAll('.rename').forEach(inp=>{
+    inp.onkeydown = ev=>{ if(ev.key==='Enter'){ act({action:'name', idx:+inp.dataset.idx, name:inp.value.trim()}); toast('renamed'); } };
+  });
+
+  // power
+  $('#powerSeg').querySelectorAll('button').forEach(b=> b.classList.toggle('on', b.dataset.mode===c.power.mode));
+  $('#powerHint').textContent = STATE.power ? `active · caffeinate holding since ${new Date(STATE.power.since).toLocaleTimeString()}` : 'no power lock held';
+  $('#blankMin').value = c.power.blankAfterMinutes;
+
+  // hud
+  $('#btnHud').textContent = STATE.hud ? 'Uninstall HUD' : 'Install HUD';
+  $('#btnHud').classList.toggle('primary', !STATE.hud);
+  $('#hudHint').textContent = STATE.hud ? 'on — pane borders show model · cost · context' : 'off — writes a statusLine into ~/.claude/settings.json (your current one is saved)';
+  $('#warnUsd').value = c.budget.warnUsd; $('#capUsd').value = c.budget.capUsd; $('#dailyUsd').value = c.budget.dailyUsd;
+
+  // defaults
+  if(document.activeElement.tagName!=='INPUT' && document.activeElement.tagName!=='SELECT'){
+    $('#paneCount').value = Array.isArray(c.panes) ? '' : c.panes;
+    $('#paneCount').placeholder = Array.isArray(c.panes) ? `${c.panes.length} named panes` : '';
+    $('#paneCount').disabled = Array.isArray(c.panes);
+    $('#layout').value = c.layout; $('#command').value = c.command; $('#cwd').value = c.cwd; $('#theme').value = c.ui.theme;
+  }
+}
+
+// wire
+$('#btnUp').onclick = ()=> act({action:'up', template:$('#tplSel').value||undefined});
+$('#btnDown').onclick = ()=> act({action:'down'});
+$('#btnNext').onclick = ()=> act({action:'next'});
+$('#btnBlank').onclick = ()=> act({action:'blank'});
+$('#btnHud').onclick = ()=> act({action: STATE.hud ? 'hud-uninstall' : 'hud-install'});
+$('#powerSeg').querySelectorAll('button').forEach(b=> b.onclick = ()=> act({action:'power', mode:b.dataset.mode}));
+
+async function saveConfig(patch){ const s = await api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(patch)}); STATE.config = s.config; toast('saved'); }
+$('#btnSave').onclick = ()=> saveConfig({
+  layout: $('#layout').value,
+  command: $('#command').value,
+  cwd: $('#cwd').value,
+  ...( $('#paneCount').disabled ? {} : { panes: Math.max(1,Math.min(16,+$('#paneCount').value||4)) } ),
+  power: { blankAfterMinutes: +$('#blankMin').value||0 },
+  budget: { warnUsd:+$('#warnUsd').value||5, capUsd:+$('#capUsd').value||15, dailyUsd:+$('#dailyUsd').value||40 },
+  ui: { theme: $('#theme').value }
+});
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

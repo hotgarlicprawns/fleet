@@ -30,6 +30,7 @@ const TRIAL_FILE = path.join(CFG_DIR, 'trial.json');
 const LAYOUT_FILE = path.join(CFG_DIR, 'layout.json');
 const SESS_DIR = path.join(CFG_DIR, 'sessions');
 const HUD_SCRIPT = path.join(__dirname, '..', 'hud', 'statusline.sh');
+const GUI_HTML = path.join(__dirname, '..', 'gui', 'index.html');
 const CLAUDE_SETTINGS = path.join(HOME, '.claude', 'settings.json');
 
 const TRIAL_DAYS = 14;
@@ -372,11 +373,14 @@ function applyBorders(name, panes, cfg) {
   });
 }
 
-function buildFleet(cfg, { resumeLayout } = {}) {
+function buildFleet(cfg, { resumeLayout, noAttach } = {}) {
   const name = cfg.session;
   const panes = resumeLayout || resolvePanes(cfg);
 
-  if (sessionExists(name)) { info(`session ${c.bold(name)} exists — attaching`); return attach(name); }
+  if (sessionExists(name)) {
+    if (noAttach) { info(`session ${c.bold(name)} already running`); return 0; }
+    info(`session ${c.bold(name)} exists — attaching`); return attach(name);
+  }
 
   info(`building ${c.bold(panes.length)} panes in ${c.bold(name)} …`);
   tmux(['new-session', '-d', '-s', name, '-c', panes[0].cwd, panes[0].command]);
@@ -393,7 +397,22 @@ function buildFleet(cfg, { resumeLayout } = {}) {
   writeJSON(LAYOUT_FILE, { savedAt: new Date().toISOString(), layout: cfg.layout, panes });
   saveState({ ...loadState(), session: name, panes: panes.length });
   good(`fleet ready — ${panes.length} panes` + (cfg.hud.enabled ? c.dim('  · HUD on') : ''));
-  return attach(name);
+  return noAttach ? 0 : attach(name);
+}
+
+// shared by the `up` command and the GUI's Launch button
+async function doUp(cfg, template, { noAttach = false, noBlank = false } = {}) {
+  let eff = cfg;
+  if (template && cfg.templates[template]) eff = deepMerge(cfg, cfg.templates[template]);
+  else if (template) throw new Error(`no template "${template}" — have: ${Object.keys(cfg.templates).join(', ') || 'none'}`);
+  if (!(await gate(eff, 'panes'))) {
+    if (Array.isArray(eff.panes)) eff.panes = eff.panes.slice(0, FREE_PANE_LIMIT);
+    else eff.panes = Math.min(eff.panes, FREE_PANE_LIMIT);
+  }
+  if (!(await gate(eff, 'power'))) eff.power.mode = eff.power.mode === 'off' ? 'off' : 'awake-on';
+  if (eff.display.manageArrangement && eff.display.profileOnUp && await gate(eff, 'display')) displayApply(eff.display.profileOnUp);
+  startPower(noBlank ? { ...eff, power: { ...eff.power, blankAfterMinutes: -1 } } : eff);
+  return buildFleet(eff, { noAttach });
 }
 function attach(name) {
   const inside = !!process.env.TMUX;
@@ -673,6 +692,88 @@ async function configWizard(cfg) {
 }
 
 // ---------------------------------------------------------------------------
+// gui — a local settings + status panel (127.0.0.1 only, no dependencies)
+// ---------------------------------------------------------------------------
+
+async function guiState(cfg) {
+  const running = sessionExists(cfg.session);
+  let panes = [];
+  if (running) {
+    panes = (tmux(['list-panes', '-t', cfg.session, '-F', '#{pane_index}\t#{pane_current_path}\t#{?pane_active,1,0}']).stdout || '')
+      .trim().split('\n').filter(Boolean).map(r => {
+        const [idx, p, active] = r.split('\t');
+        const name = tmux(['show-option', '-p', '-t', `${cfg.session}.${idx}`, '-v', '@fleet_name']).stdout.trim();
+        const s = sessionForPath(p) || {};
+        return { idx: +idx, name: name || `pane ${idx}`, active: active === '1', path: p,
+          model: s.model || null, costUsd: Number(s.costUsd) || 0, ctxPct: s.ctxPct || 0, attention: !!s.attention, state: s.state || null };
+      });
+  }
+  const e = await entitlement(cfg);
+  const st = loadState();
+  return {
+    config: cfg, running, panes,
+    power: st.caffeinatePid ? { mode: st.powerMode, since: st.startedAt } : null,
+    hud: !!((readJSON(CLAUDE_SETTINGS) || {}).statusLine && String((readJSON(CLAUDE_SETTINGS) || {}).statusLine.command || '').includes('fleet')),
+    entitlement: e,
+    templates: Object.keys(cfg.templates || {})
+  };
+}
+
+function guiServer(cfg, { port, open }) {
+  const http = require('http');
+  if (!fs.existsSync(GUI_HTML)) { fail('GUI page missing at ' + GUI_HTML); return; }
+  const html = fs.readFileSync(GUI_HTML);
+
+  const send = (res, code, body, type = 'application/json') => {
+    res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' });
+    res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
+  };
+  const readBody = req => new Promise(r => { let b = ''; req.on('data', d => b += d); req.on('end', () => { try { r(JSON.parse(b || '{}')); } catch { r({}); } }); });
+
+  const server = http.createServer(async (req, res) => {
+    try {
+      const u = new URL(req.url, 'http://localhost');
+      if (req.method === 'GET' && u.pathname === '/') return send(res, 200, html, 'text/html; charset=utf-8');
+      if (req.method === 'GET' && u.pathname === '/api/state') return send(res, 200, await guiState(loadConfig()));
+
+      if (req.method === 'POST' && u.pathname === '/api/config') {
+        const patch = await readBody(req);
+        const merged = deepMerge(loadConfig(), patch);
+        saveConfig(merged);
+        return send(res, 200, { ok: true, config: merged });
+      }
+      if (req.method === 'POST' && u.pathname === '/api/action') {
+        const { action, mode, template, idx, name } = await readBody(req);
+        const cur = loadConfig();
+        if (action === 'up') { try { await doUp(cur, template, { noAttach: true, noBlank: true }); } catch (e) { return send(res, 400, { error: e.message }); } }
+        else if (action === 'down') tearDown(cur);
+        else if (action === 'blank') blankDisplay();
+        else if (action === 'power' && mode) { cur.power.mode = mode; saveConfig(cur); if (await gate(cur, 'power')) { stopPower(); startPower(cur); } }
+        else if (action === 'next') nextWaiting(cur);
+        else if (action === 'name' && idx != null && name) nameP(cur, String(idx), name);
+        else if (action === 'hud-install') hudInstall();
+        else if (action === 'hud-uninstall') hudUninstall();
+        else return send(res, 400, { error: 'unknown action' });
+        return send(res, 200, await guiState(loadConfig()));
+      }
+      send(res, 404, { error: 'not found' });
+    } catch (e) { send(res, 500, { error: e.message }); }
+  });
+
+  server.listen(port, '127.0.0.1', () => {
+    const url = `http://127.0.0.1:${port}`;
+    banner(cfg);
+    box('fleet gui', [
+      `${c.dim('url    ')} ${c.c(url)}`,
+      `${c.dim('bind   ')} 127.0.0.1 only — nothing is exposed to the network`,
+      c.dim('Ctrl-C to stop')
+    ]);
+    if (open) sh('open', [url]);
+  });
+  return new Promise(() => {}); // run until killed
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -699,7 +800,8 @@ const HELP = `
     fleet display save|apply <name>
 
   ${c.bold('SETUP')}
-    fleet config             interactive settings
+    fleet config             interactive settings (terminal)
+    fleet gui                open the settings + status panel in a browser
     fleet tune               reduce editor memory use (GPU accel off)
     fleet doctor             check dependencies
     fleet buy                how to get Pro
@@ -737,19 +839,21 @@ async function main() {
     case 'up': {
       requireMac(); checkDeps();
       banner(cfg);
-      let eff = cfg;
-      if (sub && cfg.templates[sub]) { eff = deepMerge(cfg, cfg.templates[sub]); info(`template ${c.bold(sub)}`); }
-      else if (sub) { fail(`no template "${sub}" — templates: ${Object.keys(cfg.templates).join(', ') || 'none'}`); break; }
-      if (!(await gate(eff, 'panes'))) {
-        if (Array.isArray(eff.panes)) eff.panes = eff.panes.slice(0, FREE_PANE_LIMIT);
-        else eff.panes = Math.min(eff.panes, FREE_PANE_LIMIT);
-      }
-      if (!(await gate(eff, 'power'))) eff.power.mode = eff.power.mode === 'off' ? 'off' : 'awake-on';
-      if (eff.display.manageArrangement && eff.display.profileOnUp && await gate(eff, 'display')) displayApply(eff.display.profileOnUp);
-      startPower(eff);
-      process.exit(buildFleet(eff));
+      if (sub) info(`template ${c.bold(sub)}`);
+      try { process.exit(await doUp(cfg, sub)); }
+      catch (e) { fail(e.message); process.exit(1); }
       break;
     }
+
+    case '_build':  // internal — GUI Launch button (no TTY attach)
+      requireMac(); checkDeps();
+      try { await doUp(cfg, sub, { noAttach: true }); } catch (e) { fail(e.message); }
+      break;
+
+    case 'gui':
+      requireMac();
+      await guiServer(cfg, { port: Number(process.env.FLEET_PORT) || 7787, open: sub !== '--no-open' });
+      break;
 
     case 'resume': {
       requireMac(); checkDeps();

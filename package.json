@@ -6,5 +6,5 @@
   "engines": { "node": ">=18" },
   "os": ["darwin"],
   "license": "SEE LICENSE IN LICENSE.md",
-  "files": ["bin", "hud", "plugin", "README.md"]
+  "files": ["bin", "hud", "gui", "plugin", "README.md", "LICENSE.md"]
 }
