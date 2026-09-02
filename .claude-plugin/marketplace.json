@@ -1,0 +1,13 @@
+{
+  "name": "fleet-marketplace",
+  "description": "fleet — tiled Claude Code terminal orchestration with power and display management for macOS.",
+  "owner": { "name": "bishesh" },
+  "plugins": [
+    {
+      "name": "fleet",
+      "source": "./plugin",
+      "description": "Many Claude Code terminals, one tiled screen. Keeps your Mac awake through long sessions and blanks the display without disturbing your monitor arrangement.",
+      "version": "0.1.0"
+    }
+  ]
+}

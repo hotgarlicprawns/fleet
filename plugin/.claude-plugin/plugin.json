@@ -1,0 +1,8 @@
+{
+  "name": "fleet",
+  "version": "0.1.0",
+  "description": "Many Claude Code terminals, one tiled screen. Keeps your Mac awake through long sessions and blanks the display without disturbing your monitor arrangement.",
+  "author": { "name": "bishesh" },
+  "commands": "./commands",
+  "hooks": "./hooks/hooks.json"
+}
