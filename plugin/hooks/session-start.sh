@@ -3,6 +3,7 @@
 # Honours ~/.config/fleet/config.json power.mode. Safe no-op off macOS.
 [ "$(uname)" = "Darwin" ] || exit 0
 
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/fleet/sessions" 2>/dev/null
 CFG="${XDG_CONFIG_HOME:-$HOME/.config}/fleet/config.json"
 MODE="awake-blank"
 if [ -f "$CFG" ] && command -v /usr/bin/plutil >/dev/null 2>&1; then
