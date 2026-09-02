@@ -9,6 +9,7 @@ fleet up            # tiled grid of N `claude` sessions + power management
 fleet down          # tear it down, release the awake-lock
 fleet status         # pretty dashboard
 fleet power awake-blank
+fleet watch          # keep awake + auto-blank after N min idle
 fleet config         # interactive wizard
 ```
 
@@ -68,17 +69,26 @@ saved yourself.
 
 | | Free | Pro |
 |---|---|---|
+| Price | $0 | $6/mo or $49 once |
 | Panes | 2 | 16 |
-| Power modes | `awake-on`, `off` | all |
+| Power modes | `awake-on`, `off` | all + `fleet watch` |
 | Display profiles | — | ✓ |
 | Themes | aurora | all |
 
-`fleet license activate <key>` — keys issued by Dodo Payments. Set
-`license.productId` in config to your product.
+Keys are issued through **Dodo Payments** and verified against the public
+license endpoints (no API key needed):
+
+```
+fleet license activate <key>     # POST /licenses/activate
+fleet license status             # POST /licenses/validate
+fleet license deactivate         # POST /licenses/deactivate — frees the seat
+```
+
+7-day offline grace period. Point `license.apiBase` at
+`https://test.dodopayments.com` while developing.
 
 ## Roadmap
 
 - Linux (`systemd-inhibit` + tmux)
 - WezTerm / kitty native-split backend
-- `fleet watch` — auto-blank after N minutes idle, auto-restore on activity
 - Session templates (`fleet up --template review`)

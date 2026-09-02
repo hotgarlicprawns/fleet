@@ -208,9 +208,50 @@ function startPower(cfg) {
       info(`display will blank in ${delay} min ${c.dim('(system stays awake)')}`);
       // schedule a detached blank
       spawn('/bin/sh', ['-c', `sleep ${delay * 60}; pmset displaysleepnow`], { detached: true, stdio: 'ignore' }).unref();
-    } else {
+    } else if (delay === 0) {
       blankDisplay();
     }
+    // delay < 0 → caller (e.g. `fleet watch`) manages blanking itself
+  }
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function idleSeconds() {
+  const out = sh('/bin/sh', ['-c',
+    "ioreg -c IOHIDSystem 2>/dev/null | awk '/HIDIdleTime/ {print $NF/1000000000; exit}'"]).stdout;
+  return parseFloat(out) || 0;
+}
+
+async function watchLoop(cfg) {
+  requireMac();
+  const mins = Number(cfg.power.blankAfterMinutes) > 0 ? Number(cfg.power.blankAfterMinutes) : 10;
+  THEME = THEMES[cfg.ui.theme] || THEMES.aurora;
+  banner(cfg);
+  box('fleet watch', [
+    `${c.dim('idle threshold ')} ${mins} min → blank display`,
+    `${c.dim('system         ')} kept awake (${cfg.power.mode === 'off' ? 'awake-blank' : cfg.power.mode})`,
+    `${c.dim('display        ')} arrangement never touched`,
+    c.dim('Ctrl-C to stop')
+  ]);
+  const keepMode = cfg.power.mode === 'off' ? 'awake-blank' : cfg.power.mode;
+  if (!loadState().caffeinatePid) {
+    startPower({ ...cfg, power: { ...cfg.power, mode: keepMode, blankAfterMinutes: -1 } });
+  }
+  process.on('SIGINT', () => { if (cfg.power.releaseOnDetach) stopPower(); process.exit(0); });
+
+  let blanked = false;
+  for (;;) {
+    const idle = idleSeconds();
+    if (!blanked && idle >= mins * 60) {
+      info(`${Math.round(idle / 60)} min idle → blanking`);
+      blankDisplay();
+      blanked = true;
+    } else if (blanked && idle < 5) {
+      info('activity resumed');
+      blanked = false;
+    }
+    await sleep(15000);
   }
 }
 
@@ -363,10 +404,11 @@ async function licenseActivate(key, cfg) {
     const r = await postJSON(`${cfg.license.apiBase}/licenses/activate`,
       { license_key: key, name: instanceName });
     if (r.status >= 200 && r.status < 300) {
-      saveLicense({ key, instanceId: r.body.id || null, activatedAt: new Date().toISOString(), valid: true });
+      saveLicense({ key, instanceId: r.body.id || null, licenseKeyId: r.body.license_key_id || r.body.license_key || null, activatedAt: new Date().toISOString(), valid: true });
       good('license activated — thank you for supporting fleet ♥');
     } else {
-      fail(`activation failed (${r.status}): ${r.body.message || 'invalid key'}`);
+      const msg = { 403: 'license key is inactive / cannot be activated', 404: 'license key not found', 422: 'activation limit reached — deactivate another device first' }[r.status];
+      fail(`activation failed (${r.status}): ${msg || r.body.message || 'invalid key'}`);
     }
   } catch (e) {
     fail('could not reach license server: ' + e.message);
@@ -389,6 +431,17 @@ async function licenseValidate(cfg, { quiet = false } = {}) {
     if (!quiet) warn(`offline — ${grace ? 'using 7-day grace period' : 'grace expired'}`);
     return { ok: grace, offline: true };
   }
+}
+
+async function licenseDeactivate(cfg) {
+  const lic = loadLicense();
+  if (!lic || !lic.key) { fail('no license on this machine'); return; }
+  try {
+    const r = await postJSON(`${cfg.license.apiBase}/licenses/deactivate`,
+      { license_key: lic.key, license_key_instance_id: lic.instanceId });
+    if (r.status >= 200 && r.status < 300) { try { fs.unlinkSync(LICENSE_FILE); } catch {} good('license deactivated on this machine — a seat is freed'); }
+    else fail(`deactivation failed (${r.status}): ${r.body.message || ''}`);
+  } catch (e) { fail('could not reach license server: ' + e.message); }
 }
 
 const FREE_PANE_LIMIT = 2;
@@ -498,10 +551,11 @@ const HELP = `
     fleet config             interactive configuration wizard
     fleet power <mode>       awake-blank | awake-on | prevent-all | off
     fleet blank              blank the display now (arrangement untouched)
+    fleet watch              keep awake + auto-blank after N min idle, restore on activity
     fleet display save <n>   save current monitor arrangement as profile <n>
     fleet display apply <n>  re-apply a saved arrangement profile
     fleet license activate <key>
-    fleet license status
+    fleet license status | deactivate
     fleet doctor             check dependencies
 
   ${c.bold('CONFIG')}  ${c.dim(CFG_FILE)}
@@ -575,6 +629,9 @@ async function main() {
     case 'blank':
       requireMac(); blankDisplay(); break;
 
+    case 'watch':
+      await watchLoop(cfg); break;
+
     case 'display': {
       requireMac();
       if (sub === 'save' && rest[0]) displaySave(rest[0], cfg);
@@ -585,8 +642,12 @@ async function main() {
 
     case 'license': {
       if (sub === 'activate') await licenseActivate(rest[0], cfg);
-      else if (sub === 'status') await licenseValidate(cfg);
-      else fail('usage: fleet license activate <key> | fleet license status');
+      else if (sub === 'status') {
+        if (!loadLicense()) fail('no license — Free tier (' + FREE_PANE_LIMIT + ' panes). `fleet license activate <key>`');
+        else await licenseValidate(cfg);
+      }
+      else if (sub === 'deactivate') await licenseDeactivate(cfg);
+      else fail('usage: fleet license activate <key> | status | deactivate');
       break;
     }
 
