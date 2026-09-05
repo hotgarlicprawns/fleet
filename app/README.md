@@ -12,9 +12,15 @@ they share `~/.config/fleet/`.
 
 ## What it does today
 
-- **Screens** — tabs across the top. Each screen has its own tiled grid of
+- **Sidebar** (Codex/Claude-app style) — Screens are grouped by **Project**
+  (the repo they're worktree'd from), each expandable, plus a **Recents**
+  list of your most recently active screens across every project. Hover a
+  project header for two one-click buttons — spin up a new `claude` or
+  `codex` screen in that project instantly, no dialog. The "+" at the top
+  opens the full New Screen sheet when you want a specific branch/pane count.
+- **Screens** — each an independent workspace with its own tiled grid of
   terminal panes. All screens keep running in the background when you switch
-  tabs — nothing pauses or restarts.
+  between them in the sidebar — nothing pauses or restarts.
 - **Git worktrees** — "+" → optionally point a screen at a repo + branch.
   Fleet runs `git worktree add` into `<repo>-worktrees/<branch>` next to the
   repo and starts every pane there. Two screens on two branches never share a

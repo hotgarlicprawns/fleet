@@ -246,6 +246,65 @@ final class CockpitStore: ObservableObject {
     func screenCost(_ screen: Screen) -> Double {
         screen.panes.reduce(0) { $0 + (statByPane[$1.id]?.costUsd ?? 0) }
     }
+    func screenLastActive(_ screen: Screen) -> Double {
+        screen.panes.map { statByPane[$0.id]?.updated ?? 0 }.max() ?? 0
+    }
+
+    // MARK: project grouping (sidebar)
+
+    struct ProjectGroup: Identifiable {
+        var id: String            // repoPath, or "" for the ungrouped bucket
+        var name: String
+        var screens: [Screen]
+    }
+
+    /// Screens grouped by the repo they're worktree'd from — mirrors how a
+    /// Codex/Claude-style sidebar groups conversations under a project.
+    /// Non-git screens land in a trailing "No Project" bucket.
+    func projectGroups() -> [ProjectGroup] {
+        var order: [String] = []
+        var buckets: [String: [Screen]] = [:]
+        for s in screens {
+            let key = s.repoPath ?? ""
+            if buckets[key] == nil { order.append(key); buckets[key] = [] }
+            buckets[key]!.append(s)
+        }
+        // real projects first (by most recent activity), "No Project" last
+        let real = order.filter { !$0.isEmpty }
+            .sorted { (buckets[$0]!.map(screenLastActive).max() ?? 0) > (buckets[$1]!.map(screenLastActive).max() ?? 0) }
+        var groups = real.map { key in
+            ProjectGroup(id: key, name: (key as NSString).lastPathComponent, screens: buckets[key]!)
+        }
+        if let none = buckets[""], !none.isEmpty {
+            groups.append(ProjectGroup(id: "", name: "No Project", screens: none))
+        }
+        return groups
+    }
+
+    func recentScreens(limit: Int = 6) -> [Screen] {
+        screens.filter { screenLastActive($0) > 0 }
+            .sorted { screenLastActive($0) > screenLastActive($1) }
+            .prefix(limit)
+            .map { $0 }
+    }
+
+    /// e.g. "claude" -> "claude", then "claude 2", "claude 3", ... so a quick
+    /// spin-up never collides with an existing screen name.
+    func nextScreenName(prefix: String) -> String {
+        let existing = Set(screens.map { $0.name })
+        if !existing.contains(prefix) { return prefix }
+        var n = 2
+        while existing.contains("\(prefix) \(n)") { n += 1 }
+        return "\(prefix) \(n)"
+    }
+
+    /// One-click spin-up: a single-pane screen of the given agent, in the
+    /// given project (or ungrouped if `repoPath` is nil).
+    @discardableResult
+    func quickSpin(agent: String, repoPath: String?) -> Screen {
+        addScreen(name: nextScreenName(prefix: agent), repoPath: repoPath, branch: nil,
+                  baseBranch: "main", paneCount: 1, command: agent)
+    }
 
     // MARK: git sync
 
