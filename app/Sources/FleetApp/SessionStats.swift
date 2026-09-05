@@ -8,6 +8,8 @@ struct SessionStat: Decodable {
     var model: String?
     var costUsd: Double?
     var ctxPct: Int?
+    var rl5h: Int?      // 5-hour rate-limit used %, from Claude Code's statusLine hook
+    var rl7d: Int?      // 7-day rate-limit used %
     var attention: Bool?
     var state: String?
     var updated: Double?

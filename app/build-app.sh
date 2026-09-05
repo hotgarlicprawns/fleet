@@ -22,6 +22,10 @@ for b in "$BUILD_DIR"/*.bundle; do
   [ -e "$b" ] && cp -R "$b" "$APP/Contents/Resources/" && echo "▸ bundled $(basename "$b")"
 done
 
+# the HUD statusline script, so "Install HUD" works with no CLI installed
+cp ../hud/statusline.sh "$APP/Contents/Resources/hud-statusline.sh"
+echo "▸ bundled hud-statusline.sh"
+
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

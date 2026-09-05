@@ -14,6 +14,7 @@ struct CockpitView: View {
             VStack(spacing: 0) {
                 toolbar
                 Rectangle().fill(Theme.line).frame(height: 1)
+                if !store.hudInstalled { hudOnboardingBanner }
                 ZStack {
                     ForEach(store.screens) { screen in
                         ScreenGrid(screen: screen)
@@ -30,6 +31,20 @@ struct CockpitView: View {
         }
         .background(Theme.ground)
         .sheet(isPresented: $showingNewScreen) { NewScreenSheet(isPresented: $showingNewScreen) }
+    }
+
+    private var hudOnboardingBanner: some View {
+        HStack(spacing: 10) {
+            Circle().fill(Theme.accent).frame(width: 6, height: 6)
+            Text("Cost, context and rate-limit tracking is off.")
+                .font(Theme.mono(11.5)).foregroundStyle(Theme.inkSoft)
+            Text("One click — wires into Claude Code, keeps your current status line.")
+                .font(Theme.mono(11)).foregroundStyle(Theme.inkFaint)
+            Spacer()
+            FleetButton(title: "Turn on HUD", primary: true) { store.installHUD() }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(Theme.panel2)
     }
 
     private var toolbar: some View {
@@ -81,6 +96,20 @@ struct CockpitView: View {
             }
             Text(String(format: "$%.2f today", store.totalToday))
                 .font(Theme.mono(12)).foregroundStyle(Theme.inkFaint)
+
+            Menu {
+                if store.hudInstalled {
+                    Button("Turn off HUD") { store.uninstallHUD() }
+                } else {
+                    Button("Turn on HUD") { store.installHUD() }
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Circle().fill(store.hudInstalled ? Theme.accent : Theme.inkFaint).frame(width: 6, height: 6)
+                    Text("HUD").font(Theme.mono(10.5, .medium)).foregroundStyle(Theme.inkFaint)
+                }
+            }.menuStyle(.borderlessButton).fixedSize()
+                .help(store.hudInstalled ? "HUD is on — click to turn off" : "HUD is off — click to turn on")
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
         .background(Theme.panel)
@@ -308,9 +337,13 @@ private struct PaneCell: View {
     private var stat: SessionStat? { store.statByPane[pane.id] }
 
     var body: some View {
-        ZStack(alignment: .top) {
-            TerminalPane(pane: pane, focusRequest: $store.focusRequest)
+        // VStack, not an overlay ZStack: the header takes its own row and the
+        // terminal gets the *remaining* height, so nothing renders underneath
+        // it. (An overlay looked identical at rest but clipped the terminal's
+        // first line or two of real output — e.g. Claude Code's own banner.)
+        VStack(spacing: 0) {
             header
+            TerminalPane(pane: pane, focusRequest: $store.focusRequest)
         }
         .clipped()
         .overlay(Rectangle().stroke(stat?.attention == true ? Theme.accent : Theme.line,
@@ -318,35 +351,47 @@ private struct PaneCell: View {
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
-            Circle().fill(dotColor).frame(width: 7, height: 7)
-            if editing {
-                TextField("name", text: $draft, onCommit: commit)
-                    .textFieldStyle(.plain)
-                    .font(Theme.mono(11, .medium)).foregroundStyle(Theme.ink)
-                    .frame(width: 120)
-            } else {
-                Text(pane.name)
-                    .font(Theme.mono(11, .medium)).foregroundStyle(Theme.inkSoft)
-                    .onTapGesture(count: 2) { draft = pane.name; editing = true }
-            }
-            Spacer()
-            if let s = stat {
-                HStack(spacing: 10) {
-                    if s.attention == true {
-                        Text("WAITING").font(Theme.mono(9, .bold)).foregroundStyle(Theme.accent)
-                    }
-                    if let m = s.model { Text(m).foregroundStyle(Theme.inkFaint) }
-                    if let cost = s.costUsd, cost > 0 { Text(String(format: "$%.2f", cost)).foregroundStyle(costColor(cost)) }
-                    if let ctx = s.ctxPct, ctx > 0 { Text("ctx \(ctx)%").foregroundStyle(Theme.inkFaint) }
+        VStack(spacing: 3) {
+            HStack(spacing: 8) {
+                Circle().fill(dotColor).frame(width: 7, height: 7)
+                if editing {
+                    TextField("name", text: $draft, onCommit: commit)
+                        .textFieldStyle(.plain)
+                        .font(Theme.mono(11, .medium)).foregroundStyle(Theme.ink)
+                        .frame(width: 120)
+                } else {
+                    Text(pane.name)
+                        .font(Theme.mono(11, .medium)).foregroundStyle(Theme.inkSoft)
+                        .onTapGesture(count: 2) { draft = pane.name; editing = true }
                 }
-                .font(Theme.mono(10))
+                if stat?.attention == true {
+                    Text("WAITING").font(Theme.mono(9, .bold)).foregroundStyle(Theme.accent)
+                }
+                Spacer()
+                if let m = stat?.model { Text(m).font(Theme.mono(10)).foregroundStyle(Theme.inkFaint) }
+            }
+            if let s = stat, (s.costUsd ?? 0) > 0 || (s.ctxPct ?? 0) > 0 || s.rl5h != nil {
+                HStack(spacing: 12) {
+                    if let cost = s.costUsd, cost > 0 {
+                        statChip("$" + String(format: "%.2f", cost), costColor(cost))
+                    }
+                    if let ctx = s.ctxPct, ctx > 0 { statChip("ctx \(ctx)%", ctxColor(ctx)) }
+                    if let rl5 = s.rl5h { statChip("5h \(rl5)%", rateColor(rl5)) }
+                    if let rl7 = s.rl7d { statChip("7d \(rl7)%", rateColor(rl7)) }
+                    Spacer()
+                }
             }
         }
-        .padding(.horizontal, 10).padding(.vertical, 5)
-        .background(Theme.panel)   // fully opaque — a translucent header let terminal text bleed through
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(Theme.panel)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    private func statChip(_ text: String, _ color: Color) -> some View {
+        Text(text).font(Theme.mono(9.5, .medium)).foregroundStyle(color)
+    }
+    private func ctxColor(_ c: Int) -> Color { c >= 85 ? Theme.red : c >= 60 ? Theme.amber : Theme.inkFaint }
+    private func rateColor(_ p: Int) -> Color { p >= 90 ? Theme.red : p >= 70 ? Theme.amber : Theme.inkFaint }
 
     private var dotColor: Color {
         switch stat?.state {

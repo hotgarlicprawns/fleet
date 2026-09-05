@@ -72,6 +72,7 @@ final class CockpitStore: ObservableObject {
     @Published var focusRequest: UUID?
     @Published var gitLog: [UUID: String] = [:]      // screenID -> last git action output
     @Published var gitBusy: Set<UUID> = []
+    @Published var hudInstalled: Bool = HUDManager.isInstalled
 
     private let power = PowerManager()
     private var timer: Timer?
@@ -305,6 +306,11 @@ final class CockpitStore: ObservableObject {
         addScreen(name: nextScreenName(prefix: agent), repoPath: repoPath, branch: nil,
                   baseBranch: "main", paneCount: 1, command: agent)
     }
+
+    // MARK: HUD onboarding
+
+    func installHUD() { _ = HUDManager.install(); hudInstalled = HUDManager.isInstalled }
+    func uninstallHUD() { _ = HUDManager.uninstall(); hudInstalled = HUDManager.isInstalled }
 
     // MARK: git sync
 
