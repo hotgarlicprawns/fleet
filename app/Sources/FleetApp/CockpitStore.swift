@@ -274,12 +274,27 @@ final class CockpitStore: ObservableObject {
     }
 
     // MARK: polling
+    // One directory scan per cycle (not one per pane — see SessionStats.all's
+    // doc comment; that was an O(panes × sidecar-files) bug at real scale),
+    // done off the main actor since a large sessions/ folder means real I/O.
+
+    private var pollCount = 0
 
     private func poll() {
-        var map: [UUID: SessionStat] = [:]
-        for s in screens { for pane in s.panes { if let stat = SessionStats.forPath(pane.cwd) { map[pane.id] = stat } } }
-        statByPane = map
-        totalToday = SessionStats.totalCostToday()
+        let paneCwds: [(UUID, String)] = screens.flatMap { s in s.panes.map { ($0.id, $0.cwd) } }
+        pollCount += 1
+        let prune = pollCount % 100 == 0   // roughly every ~5 minutes at a 3s interval
+        Task.detached(priority: .utility) {
+            let stats = SessionStats.all()
+            var map: [UUID: SessionStat] = [:]
+            for (id, cwd) in paneCwds { if let s = SessionStats.match(stats, path: cwd) { map[id] = s } }
+            let total = SessionStats.totalCostToday(stats)
+            if prune { SessionStats.pruneOlderThan(days: 30) }
+            await MainActor.run {
+                self.statByPane = map
+                self.totalToday = total
+            }
+        }
     }
 
     // MARK: displays

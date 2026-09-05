@@ -28,8 +28,16 @@ struct TerminalPane: NSViewRepresentable {
         }
         let cmd = UserEnv.resolveCommand(pane.command)
         flog("TerminalPane.makeNSView pane=\(pane.name) cmd=\(cmd)")
+        // No `exec` here: `pane.command` can be any shell text a user types —
+        // a bare program ("claude"), one with args ("codex --model x"), or a
+        // compound one-liner ("npm i && npm run dev"). `exec` only parses a
+        // single simple command; anything with `;`/`&&`/`|` fails with a
+        // silent "command not found" (exit 127). Running it as the shell's
+        // last statement (no exec) handles every shape correctly, at the
+        // cost of one extra process in the tree — the same trade every
+        // ordinary terminal profile makes.
         term.startProcess(executable: shell,
-                          args: ["-c", "cd '\(dir)' && exec \(cmd)"],
+                          args: ["-c", "cd '\(dir)' && \(cmd)"],
                           environment: env)
         return term
     }
