@@ -1,0 +1,316 @@
+import SwiftUI
+import AppKit
+
+struct PaneConfig: Identifiable, Codable, Equatable {
+    var id = UUID()
+    var name: String
+    var command: String
+    var cwd: String
+
+    enum CodingKeys: String, CodingKey { case id, name, command, cwd }
+
+    init(name: String, command: String, cwd: String) {
+        self.name = name; self.command = command; self.cwd = cwd
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
+        name = try c.decode(String.self, forKey: .name)
+        command = (try? c.decode(String.self, forKey: .command)) ?? "claude"
+        cwd = (try? c.decode(String.self, forKey: .cwd)) ?? FileManager.default.homeDirectoryForCurrentUser.path
+    }
+}
+
+/// One independent workspace: its own terminal grid, and — when created from a
+/// repo — its own git worktree/branch, so agents in different screens never
+/// touch the same working tree.
+struct Screen: Identifiable, Codable, Equatable {
+    var id = UUID()
+    var name: String
+    var repoPath: String?
+    var worktreePath: String?
+    var branch: String?
+    var baseBranch: String = "main"
+    var panes: [PaneConfig]
+
+    var isGitBacked: Bool { worktreePath != nil }
+
+    enum CodingKeys: String, CodingKey { case id, name, repoPath, worktreePath, branch, baseBranch, panes }
+
+    init(id: UUID = UUID(), name: String, repoPath: String? = nil, worktreePath: String? = nil,
+         branch: String? = nil, baseBranch: String = "main", panes: [PaneConfig]) {
+        self.id = id; self.name = name; self.repoPath = repoPath; self.worktreePath = worktreePath
+        self.branch = branch; self.baseBranch = baseBranch; self.panes = panes
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
+        name = (try? c.decode(String.self, forKey: .name)) ?? "screen"
+        repoPath = try? c.decode(String.self, forKey: .repoPath)
+        worktreePath = try? c.decode(String.self, forKey: .worktreePath)
+        branch = try? c.decode(String.self, forKey: .branch)
+        baseBranch = (try? c.decode(String.self, forKey: .baseBranch)) ?? "main"
+        panes = (try? c.decode([PaneConfig].self, forKey: .panes)) ?? []
+    }
+}
+
+struct DisplayInfo: Identifiable, Hashable {
+    var id: CGDirectDisplayID
+    var name: String
+    var isMain: Bool
+}
+
+@MainActor
+final class CockpitStore: ObservableObject {
+    @Published var screens: [Screen] = []
+    @Published var activeScreenID: UUID?
+    @Published var statByPane: [UUID: SessionStat] = [:]
+    @Published var powerMode: PowerManager.Mode = .displayOn { didSet { power.apply(powerMode); persist() } }
+    @Published var displays: [DisplayInfo] = []
+    @Published var pinnedDisplay: CGDirectDisplayID? { didSet { moveWindow(); persist() } }
+    @Published var totalToday: Double = 0
+    @Published var focusRequest: UUID?
+    @Published var gitLog: [UUID: String] = [:]      // screenID -> last git action output
+    @Published var gitBusy: Set<UUID> = []
+
+    private let power = PowerManager()
+    private var timer: Timer?
+
+    private var configDir: URL {
+        let base = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"].map(URL.init(fileURLWithPath:))
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config")
+        return base.appendingPathComponent("fleet")
+    }
+    private var appConfigURL: URL { configDir.appendingPathComponent("app.json") }
+    private var fleetConfigURL: URL { configDir.appendingPathComponent("config.json") }
+
+    var activeScreen: Screen? {
+        get { screens.first { $0.id == activeScreenID } }
+    }
+    func activeScreenIndex() -> Int? { screens.firstIndex { $0.id == activeScreenID } }
+
+    init() {
+        load()
+        power.apply(powerMode)
+        refreshDisplays()
+        poll()
+        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.poll() }
+        }
+        NotificationCenter.default.addObserver(self, selector: #selector(screensParamsChanged),
+            name: NSApplication.didChangeScreenParametersNotification, object: nil)
+    }
+
+    // MARK: config / persistence
+
+    private struct AppConfig: Codable {
+        var screens: [Screen]?
+        var panes: [PaneConfig]?     // legacy single-screen format
+        var power: String?
+        var displayID: UInt32?
+        var activeScreenID: UUID?
+    }
+
+    private func homeExpand(_ p: String) -> String {
+        p.hasPrefix("~") ? (p as NSString).expandingTildeInPath : p
+    }
+
+    func load() {
+        if let data = try? Data(contentsOf: appConfigURL),
+           let cfg = try? JSONDecoder().decode(AppConfig.self, from: data) {
+            if let s = cfg.screens, !s.isEmpty { screens = s }
+            else if let p = cfg.panes, !p.isEmpty { screens = [Screen(name: "main", panes: p)] }
+            if let p = cfg.power, let m = PowerManager.Mode(rawValue: p) { powerMode = m }
+            if let d = cfg.displayID { pinnedDisplay = d }
+            activeScreenID = cfg.activeScreenID
+        }
+        if screens.isEmpty { screens = [Screen(name: "main", panes: defaultPanesFromFleetConfig())] }
+        screens = screens.map { s in
+            var s = s
+            s.panes = s.panes.map { var q = $0; q.cwd = homeExpand(q.cwd); return q }
+            return s
+        }
+        if activeScreenID == nil || !screens.contains(where: { $0.id == activeScreenID }) {
+            activeScreenID = screens.first?.id
+        }
+    }
+
+    private func defaultPanesFromFleetConfig() -> [PaneConfig] {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        if let data = try? Data(contentsOf: fleetConfigURL),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let cmd = obj["command"] as? String ?? "claude"
+            if let arr = obj["panes"] as? [[String: Any]] {
+                return arr.enumerated().map { i, p in
+                    PaneConfig(name: p["name"] as? String ?? "pane \(i)",
+                               command: p["command"] as? String ?? cmd,
+                               cwd: homeExpand(p["cwd"] as? String ?? home))
+                }
+            }
+            if let n = obj["panes"] as? Int {
+                return (0..<max(1, n)).map { PaneConfig(name: "pane \($0)", command: cmd, cwd: home) }
+            }
+        }
+        return (0..<2).map { PaneConfig(name: "pane \($0)", command: "claude", cwd: home) }
+    }
+
+    func persist() {
+        let cfg = AppConfig(screens: screens, panes: nil, power: powerMode.rawValue,
+                             displayID: pinnedDisplay, activeScreenID: activeScreenID)
+        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(cfg) { try? data.write(to: appConfigURL) }
+    }
+
+    // MARK: screens
+
+    /// Adds a new screen. When `repoPath` is set, creates/attaches a git
+    /// worktree on `branch` and points every pane's cwd at it — an isolated
+    /// checkout so this screen's agents never collide with another screen's.
+    @discardableResult
+    func addScreen(name: String, repoPath: String?, branch: String?, baseBranch: String,
+                   paneCount: Int, command: String) -> Screen {
+        var worktreePath: String?
+        var resolvedBranch = branch
+        if let repo = repoPath, !repo.isEmpty {
+            let br = (branch?.isEmpty == false) ? branch! : name.replacingOccurrences(of: " ", with: "-").lowercased()
+            let r = GitWorktree.createOrAttach(repo: repo, branch: br)
+            if r.ok { worktreePath = r.output; resolvedBranch = br }
+            else { gitLog[UUID()] = "worktree failed: \(r.output)" }
+        }
+        let cwd = worktreePath ?? repoPath ?? FileManager.default.homeDirectoryForCurrentUser.path
+        let panes = (0..<max(1, paneCount)).map { PaneConfig(name: "pane \($0)", command: command, cwd: cwd) }
+        let screen = Screen(name: name, repoPath: repoPath, worktreePath: worktreePath,
+                             branch: resolvedBranch, baseBranch: baseBranch, panes: panes)
+        screens.append(screen)
+        activeScreenID = screen.id
+        persist()
+        return screen
+    }
+
+    func closeScreen(_ id: UUID, removeWorktree: Bool) {
+        guard let s = screens.first(where: { $0.id == id }) else { return }
+        if removeWorktree, let repo = s.repoPath, let wt = s.worktreePath {
+            _ = GitWorktree.remove(repo: repo, worktree: wt)
+        }
+        screens.removeAll { $0.id == id }
+        if activeScreenID == id { activeScreenID = screens.first?.id }
+        if screens.isEmpty { screens = [Screen(name: "main", panes: defaultPanesFromFleetConfig())]; activeScreenID = screens.first?.id }
+        persist()
+    }
+
+    func renameScreen(_ id: UUID, _ name: String) {
+        guard let i = screens.firstIndex(where: { $0.id == id }), !name.isEmpty else { return }
+        screens[i].name = name
+        persist()
+    }
+
+    func setPaneCount(_ n: Int, in screenID: UUID) {
+        guard let i = screens.firstIndex(where: { $0.id == screenID }) else { return }
+        let n = max(1, min(16, n))
+        var panes = screens[i].panes
+        if n > panes.count {
+            let cwd = panes.last?.cwd ?? screens[i].worktreePath ?? FileManager.default.homeDirectoryForCurrentUser.path
+            let cmd = panes.last?.command ?? "claude"
+            panes += (panes.count..<n).map { PaneConfig(name: "pane \($0)", command: cmd, cwd: cwd) }
+        } else if n < panes.count {
+            panes.removeLast(panes.count - n)
+        }
+        screens[i].panes = panes
+        persist()
+    }
+
+    func rename(pane id: UUID, in screenID: UUID, to name: String) {
+        guard let si = screens.firstIndex(where: { $0.id == screenID }),
+              let pi = screens[si].panes.firstIndex(where: { $0.id == id }) else { return }
+        screens[si].panes[pi].name = name.isEmpty ? screens[si].panes[pi].name : name
+        persist()
+    }
+
+    func jumpToWaiting() {
+        // first look in the active screen, then any other screen (switching to it)
+        if let s = activeScreen, let id = s.panes.first(where: { statByPane[$0.id]?.attention == true })?.id {
+            focusRequest = id; return
+        }
+        for s in screens where s.id != activeScreenID {
+            if let id = s.panes.first(where: { statByPane[$0.id]?.attention == true })?.id {
+                activeScreenID = s.id
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.focusRequest = id }
+                return
+            }
+        }
+    }
+
+    func waitingCount(_ screen: Screen) -> Int {
+        screen.panes.filter { statByPane[$0.id]?.attention == true }.count
+    }
+    func screenCost(_ screen: Screen) -> Double {
+        screen.panes.reduce(0) { $0 + (statByPane[$1.id]?.costUsd ?? 0) }
+    }
+
+    // MARK: git sync
+
+    func sync(_ screenID: UUID) {
+        guard let s = screens.first(where: { $0.id == screenID }), let wt = s.worktreePath else { return }
+        gitBusy.insert(screenID)
+        Task.detached { [base = s.baseBranch] in
+            let r = GitWorktree.sync(worktree: wt, base: base)
+            await MainActor.run {
+                self.gitLog[screenID] = r.ok ? "synced with \(base)" : r.output
+                self.gitBusy.remove(screenID)
+            }
+        }
+    }
+
+    func push(_ screenID: UUID) {
+        guard let s = screens.first(where: { $0.id == screenID }), let wt = s.worktreePath, let br = s.branch else { return }
+        gitBusy.insert(screenID)
+        Task.detached {
+            let r = GitWorktree.push(worktree: wt, branch: br)
+            await MainActor.run {
+                self.gitLog[screenID] = r.ok ? "pushed \(br)" : r.output
+                self.gitBusy.remove(screenID)
+            }
+        }
+    }
+
+    // MARK: polling
+
+    private func poll() {
+        var map: [UUID: SessionStat] = [:]
+        for s in screens { for pane in s.panes { if let stat = SessionStats.forPath(pane.cwd) { map[pane.id] = stat } } }
+        statByPane = map
+        totalToday = SessionStats.totalCostToday()
+    }
+
+    // MARK: displays
+
+    func refreshDisplays() {
+        displays = NSScreen.screens.compactMap { screen in
+            guard let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
+            let id = CGDirectDisplayID(num.uint32Value)
+            return DisplayInfo(id: id, name: screen.localizedName, isMain: CGDisplayIsMain(id) != 0)
+        }
+    }
+
+    @objc private func screensParamsChanged() {
+        refreshDisplays()
+        if let pinned = pinnedDisplay, !displays.contains(where: { $0.id == pinned }) {
+            pinnedDisplay = displays.first(where: { $0.isMain })?.id ?? displays.first?.id
+        } else {
+            moveWindow()
+        }
+    }
+
+    func moveWindow() {
+        guard let pinned = pinnedDisplay,
+              let window = NSApp.windows.first(where: { $0.isVisible }),
+              let screen = NSScreen.screens.first(where: {
+                  ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == pinned
+              })
+        else { return }
+        let vis = screen.visibleFrame
+        let size = window.frame.size
+        let origin = NSPoint(x: vis.midX - size.width / 2, y: vis.midY - size.height / 2)
+        window.setFrame(NSRect(origin: origin, size: size), display: true, animate: true)
+    }
+}

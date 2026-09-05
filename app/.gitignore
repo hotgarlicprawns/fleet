@@ -1,0 +1,4 @@
+.build/
+Fleet.app/
+*.xcodeproj/
+.swiftpm/

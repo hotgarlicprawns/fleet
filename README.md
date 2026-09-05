@@ -129,8 +129,12 @@ fleet license deactivate         # free the seat when switching machines
 
 - **now** — `npm i -g @fleet/cli` + a Homebrew tap. Zero signing cost, the
   install path devs expect, instant updates. Paid via license key.
-- **later** — a signed, notarized `.dmg` menubar app that bundles the CLI and
-  wraps `fleet gui` in a native shell. Build it once the CLI has paying users.
+- **`app/`** — a native SwiftUI cockpit (v0.1 prototype, see [app/README.md](app/README.md)):
+  Screens (tabs), each with its own tiled terminal grid and, optionally, its
+  own git worktree/branch, so independent agents never share a working tree.
+  Real PTYs via SwiftTerm, native power assertions (no `caffeinate`), a
+  display picker that survives a dead/removed monitor. Signed + notarized
+  `.dmg` distribution is the next step, once this is proven out.
 
 ## License
 
