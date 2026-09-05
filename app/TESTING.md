@@ -1,5 +1,17 @@
 # Hard-testing Fleet.app
 
+Run the whole automated suite yourself any time:
+
+```bash
+./hard-test.sh      # ~90s, backs up and restores your real app.json, exits non-zero on any failure
+./soak-test.sh &    # long-running RSS/CPU/FD monitor — see its header for how to check it later
+```
+
+`hard-test.sh` covers everything below except real UI clicks (needs
+Accessibility permission — see the script's section 8 for exactly how to
+grant it, then re-run). Last run: **16 passed, 0 failed, 1 skipped**,
+reproducible across repeats.
+
 What's been load-tested headlessly (no screen-recording/accessibility
 permission in the build environment, so this is process/resource-level, not
 visual), what it found, and what you should click through yourself.
@@ -15,6 +27,9 @@ visual), what it found, and what you should click through yourself.
 | Repeated launch | 4x cold launch/quit cycles | reliable single window every time (this exposed and fixed a phantom-window bug) |
 | Legacy/malformed config | old single-screen format, and a screen missing `id` | migrates / falls back to defaults instead of crashing (this exposed and fixed two decode bugs) |
 | Git worktree isolation | 2 screens, 2 branches, real repo | confirmed via each pane's actual `cwd` — genuinely separate working trees |
+| Worktree isolation, file-level | 2 worktrees, a real remote (local bare repo) | a file created in worktree A is provably invisible in worktree B and vice versa |
+| Sync / Push | real fetch+rebase+push against a real (local) remote | both succeed — the git plumbing itself is sound, independent of the app UI |
+| Config corruption | invalid JSON in app.json | falls back to defaults instead of crashing |
 
 ## Two real bugs this found (already fixed)
 
@@ -42,15 +57,13 @@ visual), what it found, and what you should click through yourself.
   to it — confirm the window jumps to the remaining display instead of
   vanishing.
 - **Run 2 real `claude` sessions in 2 screens on 2 branches of the same
-  repo simultaneously**, have them both touch files, then Sync one — this
-  is the actual point of the product and the one thing I can't fake headlessly
-  (it needs live model output, not synthetic loops).
-- **Push with a real `origin` remote** — everything here was verified against
-  a repo with no remote (fetch/push correctly fail with git's own error);
-  the happy path needs a real remote to confirm end to end.
-- **Leave it running overnight** with a real workload and check `Activity
-  Monitor` the next morning for RSS creep — my longest continuous
-  observation window was a few minutes.
+  repo simultaneously**, have them both touch files, then Sync one — the
+  git plumbing and filesystem isolation are proven (see above); what's left
+  untested is live model output in that setup, which needs a real prompt.
+
+`hard-test.sh`'s section 8 will run tab-click/resize checks automatically
+once you grant Accessibility permission to the terminal running it — see
+that section's output for the exact steps.
 
 ## How to push further yourself
 
