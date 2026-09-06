@@ -25,7 +25,7 @@ struct FleetApp: App {
         Window("fleet", id: "cockpit") {
             CockpitView()
                 .environmentObject(store)
-                .frame(minWidth: 900, minHeight: 560)
+                .frame(minWidth: 1040, minHeight: 600)
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1100, height: 700)

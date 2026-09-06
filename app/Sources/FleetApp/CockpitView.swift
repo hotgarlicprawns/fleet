@@ -48,43 +48,25 @@ struct CockpitView: View {
     }
 
     private var toolbar: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             if let s = store.activeScreen {
-                HStack(spacing: 6) {
-                    Circle().fill(store.waitingCount(s) > 0 ? Theme.accent : Theme.inkFaint.opacity(0.5)).frame(width: 6, height: 6)
-                    Text(s.name).font(Theme.mono(12.5, .semibold)).foregroundStyle(Theme.ink)
-                }
-                if s.isGitBacked {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.triangle.branch").font(.system(size: 9))
-                        Text(s.branch ?? "?").font(Theme.mono(11))
-                    }.foregroundStyle(Theme.inkFaint)
-
-                    FleetButton(title: "Sync \(s.baseBranch)", systemImage: "arrow.triangle.2.circlepath") { store.sync(s.id) }
-                        .disabled(store.gitBusy.contains(s.id)).opacity(store.gitBusy.contains(s.id) ? 0.5 : 1)
-                    FleetButton(title: "Push", systemImage: "arrow.up.circle") { store.push(s.id) }
-                        .disabled(store.gitBusy.contains(s.id)).opacity(store.gitBusy.contains(s.id) ? 0.5 : 1)
-
-                    if let log = store.gitLog[s.id] {
-                        Text(log).font(Theme.mono(10)).foregroundStyle(Theme.inkFaint).lineLimit(1)
-                    }
-                    Rectangle().fill(Theme.line).frame(width: 1, height: 16)
-                }
-                HStack(spacing: 6) {
-                    Text("panes").font(Theme.mono(11)).foregroundStyle(Theme.inkFaint)
-                    MiniStepper(value: Binding(get: { s.panes.count }, set: { store.setPaneCount($0, in: s.id) }))
-                }
+                Circle().fill(store.waitingCount(s) > 0 ? Theme.accent : Theme.inkFaint.opacity(0.5)).frame(width: 6, height: 6)
+                // screen name truncates first when space is tight — least costly to lose
+                Text(s.name).font(Theme.mono(12.5, .semibold)).foregroundStyle(Theme.ink)
+                    .lineLimit(1).truncationMode(.tail).frame(maxWidth: 160, alignment: .leading)
+                if s.isGitBacked { gitMenu(s) }
+                MiniStepper(value: Binding(get: { s.panes.count }, set: { store.setPaneCount($0, in: s.id) }))
             } else {
-                Text("fleet").font(Theme.mono(12.5, .semibold)).foregroundStyle(Theme.inkFaint)
+                Text("fleet").font(Theme.mono(12.5, .semibold)).foregroundStyle(Theme.inkFaint).fixedSize()
             }
 
-            Spacer()
+            Spacer(minLength: 8)
 
             Segmented(options: PowerManager.Mode.allCases.map { ($0, $0.rawValue) }, selection: $store.powerMode)
                 .help("Native power assertion — no caffeinate, no screen blanking")
 
             if !store.displays.isEmpty {
-                Chip(options: store.displays.map { ($0.id, $0.name + ($0.isMain ? " ✦" : "")) },
+                Chip(options: store.displays.map { ($0.id, shortDisplayName($0)) },
                      selection: Binding(get: { store.pinnedDisplay ?? store.displays.first?.id ?? 0 },
                                         set: { store.pinnedDisplay = $0 }))
                     .help("Pin to this display; falls back if it disappears")
@@ -94,15 +76,13 @@ struct CockpitView: View {
             if totalWaiting > 0 {
                 FleetButton(title: "\(totalWaiting) waiting", systemImage: "bell.badge.fill", primary: true) { store.jumpToWaiting() }
             }
-            Text(String(format: "$%.2f today", store.totalToday))
-                .font(Theme.mono(12)).foregroundStyle(Theme.inkFaint)
+            Text(String(format: "$%.2f", store.totalToday))
+                .font(Theme.mono(12)).foregroundStyle(Theme.inkFaint).lineLimit(1).fixedSize()
+                .help("Total Claude Code spend in the last 24h")
 
             Menu {
-                if store.hudInstalled {
-                    Button("Turn off HUD") { store.uninstallHUD() }
-                } else {
-                    Button("Turn on HUD") { store.installHUD() }
-                }
+                if store.hudInstalled { Button("Turn off HUD") { store.uninstallHUD() } }
+                else { Button("Turn on HUD") { store.installHUD() } }
             } label: {
                 HStack(spacing: 5) {
                     Circle().fill(store.hudInstalled ? Theme.accent : Theme.inkFaint).frame(width: 6, height: 6)
@@ -111,8 +91,43 @@ struct CockpitView: View {
             }.menuStyle(.borderlessButton).fixedSize()
                 .help(store.hudInstalled ? "HUD is on — click to turn off" : "HUD is off — click to turn on")
         }
-        .padding(.horizontal, 16).padding(.vertical, 10)
+        .padding(.horizontal, 16)
+        .frame(height: 44)
         .background(Theme.panel)
+    }
+
+    private func shortDisplayName(_ d: DisplayInfo) -> String {
+        var n = d.name
+        n = n.replacingOccurrences(of: " Retina Display", with: "").replacingOccurrences(of: " Display", with: "")
+        if n.count > 16 { n = String(n.prefix(15)) + "…" }
+        return n + (d.isMain ? " ✦" : "")
+    }
+
+    /// Sync / Push / last-result folded into one menu so the toolbar stays
+    /// a single fixed-height row no matter the branch name length.
+    private func gitMenu(_ s: Screen) -> some View {
+        Menu {
+            Button("Sync onto \(s.baseBranch)") { store.sync(s.id) }.disabled(store.gitBusy.contains(s.id))
+            Button("Push \(s.branch ?? "")") { store.push(s.id) }.disabled(store.gitBusy.contains(s.id))
+            if let log = store.gitLog[s.id] { Divider(); Text(log) }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.triangle.branch").font(.system(size: 9))
+                Text(s.branch ?? "?").font(Theme.mono(11)).lineLimit(1)
+                if store.gitBusy.contains(s.id) {
+                    ProgressView().controlSize(.mini).scaleEffect(0.7)
+                } else {
+                    Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold))
+                }
+            }
+            .foregroundStyle(Theme.inkFaint)
+            .fixedSize()
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(Theme.panel2)
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.lineStrong, lineWidth: 1))
+        }
+        .menuStyle(.borderlessButton).fixedSize()
     }
 }
 
@@ -333,6 +348,9 @@ private struct PaneCell: View {
     let screenID: UUID
     @State private var editing = false
     @State private var draft = ""
+    @State private var exitCode: Int32? = nil
+    @State private var exited = false
+    @State private var restartToken = 0
 
     private var stat: SessionStat? { store.statByPane[pane.id] }
 
@@ -343,11 +361,28 @@ private struct PaneCell: View {
         // first line or two of real output — e.g. Claude Code's own banner.)
         VStack(spacing: 0) {
             header
-            TerminalPane(pane: pane, focusRequest: $store.focusRequest)
+            TerminalPane(pane: pane, focusRequest: $store.focusRequest) { code in
+                exitCode = code; exited = true
+            }
+            .id("\(pane.id.uuidString)-\(restartToken)")   // bump = fresh PTY
+            .overlay { if exited { restartOverlay } }
         }
         .clipped()
         .overlay(Rectangle().stroke(stat?.attention == true ? Theme.accent : Theme.line,
                                      lineWidth: stat?.attention == true ? 2 : 1))
+    }
+
+    private var restartOverlay: some View {
+        ZStack {
+            Theme.ground.opacity(0.75)
+            VStack(spacing: 10) {
+                Text(exitCode == 0 ? "\(pane.command) exited" : "\(pane.command) exited · code \(exitCode ?? -1)")
+                    .font(Theme.mono(11)).foregroundStyle(Theme.inkSoft)
+                FleetButton(title: "Restart", systemImage: "arrow.clockwise", primary: true) {
+                    exited = false; restartToken += 1
+                }
+            }
+        }
     }
 
     private var header: some View {

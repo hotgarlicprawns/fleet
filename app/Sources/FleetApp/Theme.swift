@@ -39,15 +39,17 @@ struct Segmented<T: Hashable>: View {
                 Button { selection = opt.0 } label: {
                     Text(opt.1)
                         .font(Theme.mono(11.5, .semibold))
+                        .lineLimit(1)
+                        .fixedSize()
                         .foregroundStyle(isOn ? Theme.accentDeep : Theme.inkSoft)
-                        .padding(.horizontal, 14).padding(.vertical, 7)
-                        .frame(minWidth: 0)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
                         .background(isOn ? Theme.accent : .clear)
                 }
                 .buttonStyle(.plain)
-                if i < options.count - 1 { Divider().frame(height: 14).overlay(Theme.line) }
+                if i < options.count - 1 { Rectangle().fill(Theme.line).frame(width: 1, height: 14) }
             }
         }
+        .fixedSize()
         .background(Theme.panel2)
         .clipShape(RoundedRectangle(cornerRadius: 7))
         .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.lineStrong, lineWidth: 1))
@@ -122,8 +124,9 @@ struct FleetButton: View {
         Button(action: action) {
             HStack(spacing: 6) {
                 if let systemImage { Image(systemName: systemImage).font(.system(size: 10, weight: .semibold)) }
-                Text(title).font(Theme.mono(11.5, .semibold))
+                Text(title).font(Theme.mono(11.5, .semibold)).lineLimit(1)
             }
+            .fixedSize()
             .padding(.horizontal, 12).padding(.vertical, 7)
             .foregroundStyle(primary ? Theme.accentDeep : Theme.inkSoft)
             .background(primary ? tint : Theme.panel2)

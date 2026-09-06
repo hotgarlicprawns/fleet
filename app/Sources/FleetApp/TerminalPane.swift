@@ -2,14 +2,16 @@ import SwiftUI
 import AppKit
 import SwiftTerm
 
-/// A single Claude Code session as a real terminal (SwiftTerm PTY).
+/// A single agent session as a real terminal (SwiftTerm PTY).
 struct TerminalPane: NSViewRepresentable {
     let pane: PaneConfig
     @Binding var focusRequest: UUID?
+    var onExit: @MainActor @Sendable (Int32?) -> Void = { _ in }
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(onExit: onExit) }
 
     func makeNSView(context: Context) -> LocalProcessTerminalView {
+        context.coordinator.onExit = onExit
         let term = LocalProcessTerminalView(frame: .zero)
         term.processDelegate = context.coordinator
         term.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -28,14 +30,11 @@ struct TerminalPane: NSViewRepresentable {
         }
         let cmd = UserEnv.resolveCommand(pane.command)
         flog("TerminalPane.makeNSView pane=\(pane.name) cmd=\(cmd)")
-        // No `exec` here: `pane.command` can be any shell text a user types —
-        // a bare program ("claude"), one with args ("codex --model x"), or a
-        // compound one-liner ("npm i && npm run dev"). `exec` only parses a
-        // single simple command; anything with `;`/`&&`/`|` fails with a
-        // silent "command not found" (exit 127). Running it as the shell's
-        // last statement (no exec) handles every shape correctly, at the
-        // cost of one extra process in the tree — the same trade every
-        // ordinary terminal profile makes.
+        // No `exec`: pane.command can be any shell text — a bare program
+        // ("claude"), one with args, or a compound one-liner. `exec` only
+        // parses a single simple command; anything with ;/&&/| fails with a
+        // silent exit 127. Running it as the shell's last statement handles
+        // every shape, at the cost of one extra process in the tree.
         term.startProcess(executable: shell,
                           args: ["-c", "cd '\(dir)' && \(cmd)"],
                           environment: env)
@@ -43,6 +42,7 @@ struct TerminalPane: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: LocalProcessTerminalView, context: Context) {
+        context.coordinator.onExit = onExit
         if focusRequest == pane.id {
             nsView.window?.makeFirstResponder(nsView)
             DispatchQueue.main.async { self.focusRequest = nil }
@@ -50,15 +50,20 @@ struct TerminalPane: NSViewRepresentable {
     }
 
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
+        var onExit: @MainActor @Sendable (Int32?) -> Void
+        init(onExit: @escaping @MainActor @Sendable (Int32?) -> Void) { self.onExit = onExit }
+
         func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
         func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
         func processTerminated(source: TerminalView, exitCode: Int32?) {
             flog("processTerminated exit=\(String(describing: exitCode))")
             if let t = source as? LocalProcessTerminalView {
-                let msg = "\r\n\u{1b}[2m[process exited\(exitCode.map { " · \($0)" } ?? "")]  press ⏎ to restart\u{1b}[0m\r\n"
-                t.feed(text: msg)
+                let code = exitCode.map { " · exit \($0)" } ?? ""
+                t.feed(text: "\r\n\u{1b}[2m[process ended\(code)]\u{1b}[0m\r\n")
             }
+            let handler = onExit
+            Task { @MainActor in handler(exitCode) }
         }
     }
 }
