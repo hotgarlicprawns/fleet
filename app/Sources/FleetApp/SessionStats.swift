@@ -27,13 +27,16 @@ enum SessionStats {
     /// reuse the result — never call this per-pane in a loop (that's O(P×S)
     /// and is exactly the kind of thing that falls over once a fleet has
     /// been used for weeks and the sessions folder has hundreds of files).
-    static func all() -> [SessionStat] {
+    static func all() -> [SessionStat] { load(maxAgeHours: 8) }
+
+    /// Sidecars updated within the last `maxAgeHours`.
+    static func load(maxAgeHours: Double) -> [SessionStat] {
         guard let items = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return [] }
         let now = Date().timeIntervalSince1970
         return items
             .filter { $0.pathExtension == "json" }
             .compactMap { try? JSONDecoder().decode(SessionStat.self, from: Data(contentsOf: $0)) }
-            .filter { now - ($0.updated ?? 0) < 8 * 3600 }
+            .filter { now - ($0.updated ?? 0) < maxAgeHours * 3600 }
     }
 
     /// Best match for `path` out of an already-loaded snapshot (see `all()`).

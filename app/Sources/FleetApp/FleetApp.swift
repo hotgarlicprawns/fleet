@@ -29,6 +29,7 @@ struct FleetApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1100, height: 700)
+
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandMenu("Session") {
@@ -42,11 +43,17 @@ struct FleetApp: App {
                 }.keyboardShortcut("w", modifiers: [.command, .shift])
             }
         }
+
+        MenuBarExtra {
+            MenuBarContent().environmentObject(store)
+        } label: {
+            MenuBarLabel().environmentObject(store)
+        }
     }
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         // must happen before SwiftUI stands up its scenes, or WindowGroup/Window
         // can decide there's nothing to show and create zero windows.
@@ -56,25 +63,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
         flog("applicationDidFinishLaunching; windows=\(NSApp.windows.count)")
+        flog("hotkey ⌃⌥F registered: \(Hotkey.register { Hotkey.summon() })")
         NSApp.activate(ignoringOtherApps: true)
         Task { await ensureWindow(attempt: 0) }
     }
     private func ensureWindow(attempt: Int) async {
         try? await Task.sleep(nanoseconds: 400_000_000)
-        for w in NSApp.windows where w.title.isEmpty && w.contentView?.subviews.isEmpty != false {
-            w.close()
-        }
-        if let main = NSApp.windows.first {
+        // Pick the main window by title. NSApp.windows also holds the menu-bar
+        // status item's window, and its position in the list is not stable —
+        // taking `.first` sometimes configured the wrong one.
+        if let main = NSApp.windows.first(where: { $0.title == "fleet" }) {
+            main.delegate = self
             main.makeKeyAndOrderFront(nil)
             main.setContentSize(NSSize(width: 1100, height: 700))
             main.center()
             flog("window ready after attempt \(attempt): \(main.title)")
-        } else if attempt < 5 {
-            flog("no window yet (attempt \(attempt)) — retrying")
+        } else if attempt < 8 {
+            flog("no main window yet (attempt \(attempt)) — retrying")
             await ensureWindow(attempt: attempt + 1)
         } else {
-            flog("giving up waiting for a window")
+            flog("giving up waiting for the main window")
         }
     }
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    // The window's close button hides it instead: closing would tear the terminals
+    // down and stop every agent. Fleet lives in the menu bar; ⌃⌥F or the menu
+    // bar item brings the window back, and ⌘Q quits for real.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        sender.orderOut(nil)
+        return false
+    }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { Hotkey.summon() }
+        return true
+    }
+}
+
+private struct MenuBarLabel: View {
+    @EnvironmentObject var store: CockpitStore
+    var body: some View {
+        let waiting = store.screens.reduce(0) { $0 + store.waitingCount($1) }
+        HStack(spacing: 3) {
+            Image(systemName: waiting > 0 ? "square.grid.2x2.fill" : "square.grid.2x2")
+            if waiting > 0 { Text("\(waiting)") }
+        }
+    }
+}
+
+private struct MenuBarContent: View {
+    @EnvironmentObject var store: CockpitStore
+    var body: some View {
+        let waiting = store.screens.reduce(0) { $0 + store.waitingCount($1) }
+        Text(String(format: "$%.2f today · %d pane%@ · %@", store.totalToday, store.totalPanes,
+                    store.totalPanes == 1 ? "" : "s", store.entitlement.label))
+        if waiting > 0 { Button("Jump to waiting (\(waiting))") { store.jumpToWaiting(); Hotkey.summon() } }
+        Divider()
+        ForEach(store.screens) { s in
+            Button((s.id == store.activeScreenID ? "● " : "   ") + s.name + (store.waitingCount(s) > 0 ? "  · waiting" : "")) {
+                store.activeScreenID = s.id; Hotkey.summon()
+            }
+        }
+        Divider()
+        Button("Show Fleet   ⌃⌥F") { Hotkey.summon() }
+        Button("Quit Fleet") { NSApp.terminate(nil) }.keyboardShortcut("q")
+    }
 }

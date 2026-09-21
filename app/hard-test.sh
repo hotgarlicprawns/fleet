@@ -220,6 +220,59 @@ kill_app_tree
 pkill -f "sleep 5[123]0" 2>/dev/null; true
 
 # ---------------------------------------------------------------------------
+section "7d. closing a git-backed screen: safe worktree cleanup"
+G=/tmp/fleet-wt-clean-$$
+rm -rf "$G" "$G-worktrees"; mkdir -p "$G"
+( cd "$G" && git init -q -b main && git commit -q --allow-empty -m init \
+  && git worktree add -q -b clean-br "$G-worktrees/clean-br" && git worktree add -q -b dirty-br "$G-worktrees/dirty-br" )
+echo "precious uncommitted work" > "$G-worktrees/dirty-br/unsaved.txt"
+python3 - "$G" > "$APPJSON" <<'PYEOF'
+import json, sys
+g = sys.argv[1]
+def scr(name, br, cmd):
+    wt = f"{g}-worktrees/{br}"
+    return {"name": name, "repoPath": g, "worktreePath": wt, "branch": br, "baseBranch": "main",
+            "panes": [{"name": "p0", "command": cmd, "cwd": wt}]}
+json.dump({"screens": [scr("clean", "clean-br", "sleep 6301; sleep 0"), scr("dirty", "dirty-br", "sleep 6302; sleep 0"),
+                       {"name": "stay", "panes": [{"name": "p0", "command": "sleep 6303; sleep 0", "cwd": "/tmp"}]}],
+           "power": "Display on"}, open('/dev/stdout', 'w'))
+PYEOF
+rm -f "$CFG_DIR/app-debug.log"; launch 6
+ctl '{"cmd":"closeScreen","name":"clean","removeWorktree":true}'
+ctl '{"cmd":"closeScreen","name":"dirty","removeWorktree":true}'
+sleep 5
+[ -d "$G-worktrees/clean-br" ] && fail "clean worktree was not removed" || pass "clean worktree removed after its agent was stopped"
+( cd "$G" && git branch --list clean-br | grep -q clean-br ) && fail "merged branch was not deleted" || pass "merged branch deleted (git branch -d)"
+[ -f "$G-worktrees/dirty-br/unsaved.txt" ] && pass "worktree with uncommitted work was KEPT, file intact" || fail "DATA LOSS: uncommitted file destroyed"
+grep -q "uncommitted changes" "$CFG_DIR/app-debug.log" && pass "user told why the dirty worktree was kept" || fail "no explanation shown for the kept worktree"
+alive 6301 && fail "agent in removed worktree still running" || pass "agents of both closed screens stopped"
+alive 6303 && pass "unrelated screen untouched" || fail "cleanup killed an unrelated screen"
+kill_app_tree; pkill -f "sleep 63" 2>/dev/null
+( cd "$G" && git worktree prune ); rm -rf "$G" "$G-worktrees"
+
+# ---------------------------------------------------------------------------
+section "7e. window close hides (agents keep running); hotkey; summon"
+python3 - > "$APPJSON" <<'PYEOF'
+import json
+json.dump({"screens": [{"name": "s", "panes": [{"name": "p0", "command": "sleep 6401; sleep 0", "cwd": "/tmp"}]}],
+           "power": "Display on"}, open('/dev/stdout', 'w'))
+PYEOF
+rm -f "$CFG_DIR/app-debug.log"; launch 5
+grep -q "hotkey ⌃⌥F registered: true" "$CFG_DIR/app-debug.log" && pass "global hotkey ⌃⌥F registered" || fail "global hotkey failed to register"
+ctl '{"cmd":"windowState"}'
+grep -q "windowState: visible=true" "$CFG_DIR/app-debug.log" && pass "window visible at launch" || fail "window not visible at launch"
+ctl '{"cmd":"performClose"}'
+ctl '{"cmd":"windowState"}'
+grep -q "windowState: visible=false" "$CFG_DIR/app-debug.log" && pass "close button hides the window" || fail "close did not hide the window"
+[ -n "$(app_pid)" ] && pass "app keeps running with no window (lives in the menu bar)" || fail "app quit when its window closed"
+alive 6401 && pass "closing the window does NOT stop running agents" || fail "closing the window killed the agents"
+ctl '{"cmd":"summon"}'
+ctl '{"cmd":"windowState"}'
+tail -1 "$CFG_DIR/app-debug.log" | grep -q "visible=true" && pass "summon brings the window back" || fail "summon did not restore the window"
+alive 6401 && pass "agent survived hide + summon (same session)" || fail "agent lost across hide/summon"
+kill_app_tree; pkill -f "sleep 6401" 2>/dev/null
+
+# ---------------------------------------------------------------------------
 section "7c. licensing: free-tier cap, trial, unlock, lapse, activation errors"
 sleepers() { python3 - "$@" > "$APPJSON" <<'PYEOF'
 import json, sys

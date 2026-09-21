@@ -61,9 +61,22 @@ enum GitWorktree {
         return Result2(ok: r.ok, output: r.ok ? dest : r.output)
     }
 
-    static func remove(repo: String, worktree: String) -> Result2 {
+    /// Removes a screen's worktree WITHOUT --force: git refuses if there are
+    /// uncommitted or untracked changes, so this can never destroy work. The
+    /// branch is deleted with `-d` (merged branches only) for the same reason.
+    static func remove(repo: String, worktree: String, deleteBranch branch: String? = nil) -> Result2 {
         guard let root = repoRoot(repo) else { return Result2(ok: false, output: "not a git repository") }
-        return run(["worktree", "remove", "--force", worktree], cwd: root)
+        let r = run(["worktree", "remove", worktree], cwd: root)
+        guard r.ok else {
+            let why = r.output.contains("contains modified or untracked files") ? "it has uncommitted changes" : r.output
+            return Result2(ok: false, output: "worktree kept — \(why)")
+        }
+        var msg = "worktree removed"
+        if let b = branch {
+            let d = run(["branch", "-d", b], cwd: root)
+            msg += d.ok ? ", branch \(b) deleted" : ", branch \(b) kept (not merged)"
+        }
+        return Result2(ok: true, output: msg)
     }
 
     /// Bring a screen's branch up to date with the base branch (default main).

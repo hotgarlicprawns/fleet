@@ -74,7 +74,9 @@ final class CockpitStore: ObservableObject {
     @Published var gitBusy: Set<UUID> = []
     @Published var hudInstalled: Bool = HUDManager.isInstalled
     @Published var entitlement: Entitlement = LicenseManager.currentEntitlement()
+    @Published var notice: String? = nil
     @Published var showUpgrade = false
+    @Published var showReport = false
     @Published var upgradeReason = ""
 
     private let power = PowerManager()
@@ -214,13 +216,27 @@ final class CockpitStore: ObservableObject {
 
     func closeScreen(_ id: UUID, removeWorktree: Bool) {
         guard let s = screens.first(where: { $0.id == id }) else { return }
-        if removeWorktree, let repo = s.repoPath, let wt = s.worktreePath {
-            _ = GitWorktree.remove(repo: repo, worktree: wt)
-        }
         screens.removeAll { $0.id == id }
         if activeScreenID == id { activeScreenID = screens.first?.id }
         if screens.isEmpty { screens = [Screen(name: "main", panes: defaultPanesFromFleetConfig())]; activeScreenID = screens.first?.id }
         persist()
+        guard removeWorktree, let repo = s.repoPath, let wt = s.worktreePath else { return }
+        // Removing the screen tears its terminals down (agents get SIGTERM, then
+        // SIGKILL after 2s). Wait for that before touching the directory they ran in.
+        let branch = s.branch
+        Task.detached {
+            try? await Task.sleep(nanoseconds: 2_600_000_000)
+            let r = GitWorktree.remove(repo: repo, worktree: wt, deleteBranch: branch)
+            await MainActor.run { self.notify("\(s.name): \(r.output)") }
+        }
+    }
+
+    /// A transient message shown at the bottom of the window.
+    func notify(_ text: String) {
+        flog("notice: \(text)")
+        notice = text
+        let mine = text
+        Task { try? await Task.sleep(nanoseconds: 6_000_000_000); if self.notice == mine { self.notice = nil } }
     }
 
     func renameScreen(_ id: UUID, _ name: String) {
@@ -397,6 +413,13 @@ final class CockpitStore: ObservableObject {
         switch cmd {
         case "closeScreen": if let s = screen { closeScreen(s.id, removeWorktree: o["removeWorktree"] as? Bool ?? false) }
         case "select": if let s = screen { activeScreenID = s.id }
+        case "performClose": NSApp.windows.first(where: { $0.title == "fleet" })?.performClose(nil)
+        case "summon": Hotkey.summon()
+        case "showUpgrade": upgradeReason = o["reason"] as? String ?? ""; showUpgrade = true
+        case "showReport": showReport = true
+        case "windowState":
+            let w = NSApp.windows.first(where: { $0.title == "fleet" })
+            flog("windowState: visible=\(w?.isVisible ?? false) id=\(w?.windowNumber ?? 0) app=running all=\(NSApp.windows.map { "\($0.title.isEmpty ? "-" : $0.title):\($0.isVisible ? "v" : "h"):\(type(of: $0))" })")
         case "activate":
             let key = o["key"] as? String ?? ""
             Task { let r = await self.activateLicense(key); flog("control: activate -> \(r ?? "OK")") }
@@ -453,10 +476,14 @@ final class CockpitStore: ObservableObject {
         refreshEntitlement()
         let prune = pollCount % 100 == 0   // roughly every ~5 minutes at a 3s interval
         Task.detached(priority: .utility) {
-            let stats = SessionStats.all()
+            // one scan covers both needs: 24h for the spend total, and the last
+            // 8h (live-ish sessions) for matching panes so stale costs don't stick.
+            let day = SessionStats.load(maxAgeHours: 24)
+            let cutoff = Date().timeIntervalSince1970 - 8 * 3600
+            let recent = day.filter { ($0.updated ?? 0) > cutoff }
             var map: [UUID: SessionStat] = [:]
-            for (id, cwd) in paneCwds { if let s = SessionStats.match(stats, path: cwd) { map[id] = s } }
-            let total = SessionStats.totalCostToday(stats)
+            for (id, cwd) in paneCwds { if let s = SessionStats.match(recent, path: cwd) { map[id] = s } }
+            let total = SessionStats.totalCostToday(day)
             if prune { SessionStats.pruneOlderThan(days: 30) }
             await MainActor.run {
                 self.statByPane = map

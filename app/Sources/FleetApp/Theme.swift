@@ -136,3 +136,20 @@ struct FleetButton: View {
         .buttonStyle(.plain)
     }
 }
+
+
+/// Text input matching the toolbar controls (dark well, hairline border, teal caret)
+/// instead of the stock macOS field with its blue focus ring.
+struct FleetFieldStyle: TextFieldStyle {
+    func _body(configuration: TextField<Self._Label>) -> some View {
+        configuration
+            .textFieldStyle(.plain)
+            .font(Theme.mono(12))
+            .foregroundStyle(Theme.ink)
+            .tint(Theme.accent)
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(Theme.ground)
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.lineStrong, lineWidth: 1))
+    }
+}

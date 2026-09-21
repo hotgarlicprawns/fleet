@@ -31,8 +31,18 @@ struct CockpitView: View {
             }
         }
         .background(Theme.ground)
+        .overlay(alignment: .bottom) {
+            if let n = store.notice {
+                Text(n).font(Theme.mono(11.5)).foregroundStyle(Theme.ink)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(Theme.panel2).clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.lineStrong, lineWidth: 1))
+                    .padding(.bottom, 18).transition(.opacity)
+            }
+        }
         .sheet(isPresented: $showingNewScreen) { NewScreenSheet(isPresented: $showingNewScreen) }
         .sheet(isPresented: $store.showUpgrade) { UpgradeSheet() }
+        .sheet(isPresented: $store.showReport) { ReportSheet() }
     }
 
     @ViewBuilder private var planBanner: some View {
@@ -181,6 +191,8 @@ private struct SidebarView: View {
 
             SidebarRow(icon: "plus.circle.fill", label: "New Screen", iconColor: Theme.accent) { showingNewScreen = true }
                 .padding(.horizontal, 8)
+            SidebarRow(icon: "chart.bar", label: "Spend report") { store.showReport = true }
+                .padding(.horizontal, 8)
 
             Rectangle().fill(Theme.line).frame(height: 1).padding(.top, 10)
 
@@ -304,6 +316,21 @@ private struct ScreenRow: View {
     @State private var editing = false
     @State private var draft = ""
 
+    private func confirmClose() {
+        guard screen.isGitBacked else { store.closeScreen(screen.id, removeWorktree: false); return }
+        let a = NSAlert()
+        a.messageText = "Close “\(screen.name)”?"
+        a.informativeText = "Its agents will be stopped. The worktree \(screen.branch.map { "on branch “\($0)”" } ?? "") can be kept, or removed — removal never touches uncommitted changes."
+        a.addButton(withTitle: "Close & keep worktree")
+        a.addButton(withTitle: "Close & remove worktree")
+        a.addButton(withTitle: "Cancel")
+        switch a.runModal() {
+        case .alertFirstButtonReturn: store.closeScreen(screen.id, removeWorktree: false)
+        case .alertSecondButtonReturn: store.closeScreen(screen.id, removeWorktree: true)
+        default: break
+        }
+    }
+
     private var isActive: Bool { screen.id == store.activeScreenID }
     private var waiting: Int { store.waitingCount(screen) }
     private var cost: Double { store.screenCost(screen) }
@@ -328,7 +355,7 @@ private struct ScreenRow: View {
             if waiting > 0 { Circle().fill(Theme.accent).frame(width: 6, height: 6) }
             if cost > 0 { Text(String(format: "$%.2f", cost)).font(Theme.mono(10)).foregroundStyle(Theme.inkFaint) }
             if hover && store.screens.count > 1 {
-                Button { store.closeScreen(screen.id, removeWorktree: false) } label: { Image(systemName: "xmark") }
+                Button { confirmClose() } label: { Image(systemName: "xmark") }
                     .buttonStyle(.plain).font(.system(size: 9)).foregroundStyle(Theme.inkFaint)
             }
         }
@@ -379,6 +406,7 @@ private struct PaneCell: View {
     @State private var exitCode: Int32? = nil
     @State private var exited = false
     @State private var restartToken = 0
+    @State private var resumeCommand: String? = nil
 
     private var stat: SessionStat? { store.statByPane[pane.id] }
 
@@ -392,7 +420,7 @@ private struct PaneCell: View {
             if store.isLocked(pane.id) {
                 lockedPane
             } else {
-                TerminalPane(pane: pane, focusRequest: $store.focusRequest) { code in
+                TerminalPane(pane: pane, focusRequest: $store.focusRequest, command: resumeCommand) { code in
                     exitCode = code; exited = true
                 }
                 .id("\(pane.id.uuidString)-\(restartToken)")   // bump = fresh PTY
@@ -422,8 +450,15 @@ private struct PaneCell: View {
             VStack(spacing: 10) {
                 Text(exitCode == 0 ? "\(pane.command) exited" : "\(pane.command) exited · code \(exitCode ?? -1)")
                     .font(Theme.mono(11)).foregroundStyle(Theme.inkSoft)
-                FleetButton(title: "Restart", systemImage: "arrow.clockwise", primary: true) {
-                    exited = false; restartToken += 1
+                HStack(spacing: 8) {
+                    FleetButton(title: "Restart", systemImage: "arrow.clockwise", primary: true) {
+                        resumeCommand = nil; exited = false; restartToken += 1
+                    }
+                    if pane.command.hasPrefix("claude") && !pane.command.contains("--continue") {
+                        FleetButton(title: "Resume last chat", systemImage: "clock.arrow.circlepath") {
+                            resumeCommand = pane.command + " --continue"; exited = false; restartToken += 1
+                        }.help("Runs `claude --continue` — picks up the most recent conversation in this folder")
+                    }
                 }
             }
         }
@@ -503,16 +538,16 @@ private struct NewScreenSheet: View {
                 Text("New Screen").font(Theme.mono(15, .bold)).foregroundStyle(Theme.ink)
                 Circle().fill(Theme.accent).frame(width: 5, height: 5)
             }
-            TextField("Name (e.g. \"payments-fix\")", text: $name)
+            TextField("Name (e.g. \"payments-fix\")", text: $name).textFieldStyle(FleetFieldStyle())
             Toggle("Isolate in its own git worktree", isOn: $useGit).tint(Theme.accent)
             if useGit {
                 HStack {
-                    TextField("Repo path (e.g. ~/Projects/fleet)", text: $repoPath)
+                    TextField("Repo path (e.g. ~/Projects/fleet)", text: $repoPath).textFieldStyle(FleetFieldStyle())
                     FleetButton(title: "Choose…") { pickFolder() }
                 }
                 HStack {
-                    TextField("Branch (blank = derive from name)", text: $branch)
-                    TextField("Base", text: $baseBranch).frame(width: 90)
+                    TextField("Branch (blank = derive from name)", text: $branch).textFieldStyle(FleetFieldStyle())
+                    TextField("Base", text: $baseBranch).textFieldStyle(FleetFieldStyle()).frame(width: 90)
                 }
                 Text("Creates repo-worktrees/<branch> next to the repo, checked out on that branch — a separate copy of the files so this screen's agent never collides with another screen's.")
                     .font(.caption).foregroundStyle(Theme.inkFaint)
@@ -523,7 +558,7 @@ private struct NewScreenSheet: View {
                 Spacer()
                 Text("Command").foregroundStyle(Theme.inkSoft)
                 Chip(options: [("claude", "claude"), ("codex", "codex"), ("custom", "custom…")], selection: $command)
-                if command == "custom" { TextField("command", text: $command).frame(width: 120) }
+                if command == "custom" { TextField("command", text: $command).textFieldStyle(FleetFieldStyle()).frame(width: 120) }
             }
             HStack {
                 Spacer()
@@ -608,7 +643,7 @@ private struct UpgradeSheet: View {
                 Rectangle().fill(Theme.line).frame(height: 1)
                 Text("Already bought?").font(Theme.mono(11, .semibold)).foregroundStyle(Theme.inkFaint)
                 HStack {
-                    TextField("License key", text: $key).textFieldStyle(.roundedBorder).font(Theme.mono(12))
+                    TextField("License key", text: $key).textFieldStyle(FleetFieldStyle())
                     FleetButton(title: busy ? "Activating…" : "Activate", primary: true) {
                         busy = true; message = nil
                         Task {
@@ -630,5 +665,71 @@ private struct UpgradeSheet: View {
         .frame(width: 480)
         .background(Theme.panel)
         .foregroundStyle(Theme.ink)
+    }
+}
+
+
+// MARK: - Spend report
+
+private struct ReportSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var rows: [(project: String, sessions: Int, day: Double, week: Double)] = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Text("Spend").font(Theme.mono(15, .bold)).foregroundStyle(Theme.ink)
+                Circle().fill(Theme.accent).frame(width: 5, height: 5)
+            }
+            if rows.isEmpty {
+                Text("No billed sessions yet. Turn on the HUD (toolbar) and run a Claude Code session.")
+                    .font(.callout).foregroundStyle(Theme.inkSoft)
+            } else {
+                VStack(spacing: 0) {
+                    row("PROJECT", "SESSIONS", "24H", "7D", header: true)
+                    ForEach(rows, id: \.project) { r in
+                        row(r.project, "\(r.sessions)", money(r.day), money(r.week))
+                    }
+                    Rectangle().fill(Theme.line).frame(height: 1).padding(.vertical, 4)
+                    row("total", "\(rows.reduce(0) { $0 + $1.sessions })",
+                        money(rows.reduce(0) { $0 + $1.day }), money(rows.reduce(0) { $0 + $1.week }), bold: true)
+                }
+            }
+            Text("Each session's cost is its running total, counted in the window of its last activity.")
+                .font(.caption).foregroundStyle(Theme.inkFaint)
+            HStack { Spacer(); FleetButton(title: "Done", primary: true) { dismiss() } }
+        }
+        .padding(20).frame(width: 520)
+        .background(Theme.panel).foregroundStyle(Theme.ink)
+        .onAppear(perform: load)
+    }
+
+    private func money(_ v: Double) -> String { String(format: "$%.2f", v) }
+
+    private func row(_ a: String, _ b: String, _ c: String, _ d: String, header: Bool = false, bold: Bool = false) -> some View {
+        HStack {
+            Text(a).frame(maxWidth: .infinity, alignment: .leading)
+            Text(b).frame(width: 80, alignment: .trailing)
+            Text(c).frame(width: 80, alignment: .trailing)
+            Text(d).frame(width: 80, alignment: .trailing)
+        }
+        .font(Theme.mono(header ? 10 : 12, header || bold ? .semibold : .regular))
+        .foregroundStyle(header ? Theme.inkFaint : Theme.ink)
+        .padding(.vertical, 4)
+    }
+
+    private func load() {
+        let week = SessionStats.load(maxAgeHours: 24 * 7).filter { ($0.costUsd ?? 0) > 0 }
+        let cutoff = Date().timeIntervalSince1970 - 86_400
+        var by: [String: (n: Int, day: Double, week: Double)] = [:]
+        for s in week {
+            let k = (s.dir as NSString).lastPathComponent
+            var v = by[k] ?? (0, 0, 0)
+            v.n += 1; v.week += s.costUsd ?? 0
+            if (s.updated ?? 0) > cutoff { v.day += s.costUsd ?? 0 }
+            by[k] = v
+        }
+        rows = by.map { (project: $0.key, sessions: $0.value.n, day: $0.value.day, week: $0.value.week) }
+            .sorted { $0.week > $1.week }
     }
 }

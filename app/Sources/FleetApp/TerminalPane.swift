@@ -6,6 +6,8 @@ import SwiftTerm
 struct TerminalPane: NSViewRepresentable {
     let pane: PaneConfig
     @Binding var focusRequest: UUID?
+    /// Overrides pane.command for this launch only (used by Resume).
+    var command: String? = nil
     var onExit: @MainActor @Sendable (Int32?) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator(onExit: onExit) }
@@ -28,7 +30,7 @@ struct TerminalPane: NSViewRepresentable {
         if !env.contains(where: { $0.hasPrefix("HOME=") }) {
             env.append("HOME=\(FileManager.default.homeDirectoryForCurrentUser.path)")
         }
-        let cmd = UserEnv.resolveCommand(pane.command)
+        let cmd = UserEnv.resolveCommand(command ?? pane.command)
         flog("TerminalPane.makeNSView pane=\(pane.name) cmd=\(cmd)")
         // No `exec`: pane.command can be any shell text — a bare program
         // ("claude"), one with args, or a compound one-liner. `exec` only
