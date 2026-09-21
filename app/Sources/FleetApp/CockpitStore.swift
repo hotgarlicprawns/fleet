@@ -73,9 +73,14 @@ final class CockpitStore: ObservableObject {
     @Published var gitLog: [UUID: String] = [:]      // screenID -> last git action output
     @Published var gitBusy: Set<UUID> = []
     @Published var hudInstalled: Bool = HUDManager.isInstalled
+    @Published var entitlement: Entitlement = LicenseManager.currentEntitlement()
+    @Published var showUpgrade = false
+    @Published var upgradeReason = ""
 
     private let power = PowerManager()
     private var timer: Timer?
+    private var controlTimer: Timer?
+    private var licenseTimer: Timer?
 
     private var configDir: URL {
         let base = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"].map(URL.init(fileURLWithPath:))
@@ -97,6 +102,13 @@ final class CockpitStore: ObservableObject {
         poll()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
+        }
+        revalidateLicense()
+        licenseTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.revalidateLicense() }
+        }
+        controlTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.processControlFile() }
         }
         NotificationCenter.default.addObserver(self, selector: #selector(screensParamsChanged),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
@@ -169,7 +181,19 @@ final class CockpitStore: ObservableObject {
     /// checkout so this screen's agents never collide with another screen's.
     @discardableResult
     func addScreen(name: String, repoPath: String?, branch: String?, baseBranch: String,
-                   paneCount: Int, command: String) -> Screen {
+                   paneCount: Int, command: String) -> Screen? {
+        var paneCount = paneCount
+        if !entitlement.isEntitled {
+            let remaining = freePaneLimit - totalPanes
+            if remaining <= 0 {
+                requireUpgrade("The free tier runs \(freePaneLimit) panes. Upgrade to add more screens.")
+                return nil
+            }
+            if paneCount > remaining {
+                paneCount = remaining
+                requireUpgrade("Free tier is capped at \(freePaneLimit) panes — this screen was created with \(remaining).")
+            }
+        }
         var worktreePath: String?
         var resolvedBranch = branch
         if let repo = repoPath, !repo.isEmpty {
@@ -207,7 +231,15 @@ final class CockpitStore: ObservableObject {
 
     func setPaneCount(_ n: Int, in screenID: UUID) {
         guard let i = screens.firstIndex(where: { $0.id == screenID }) else { return }
-        let n = max(1, min(16, n))
+        var n = max(1, min(16, n))
+        if n > screens[i].panes.count, !entitlement.isEntitled {
+            let others = totalPanes - screens[i].panes.count
+            let allowed = max(1, freePaneLimit - others)
+            if n > allowed {
+                n = max(allowed, screens[i].panes.count)
+                requireUpgrade("The free tier runs \(freePaneLimit) panes. Upgrade for up to 16 per screen.")
+            }
+        }
         var panes = screens[i].panes
         if n > panes.count {
             let cwd = panes.last?.cwd ?? screens[i].worktreePath ?? FileManager.default.homeDirectoryForCurrentUser.path
@@ -302,9 +334,79 @@ final class CockpitStore: ObservableObject {
     /// One-click spin-up: a single-pane screen of the given agent, in the
     /// given project (or ungrouped if `repoPath` is nil).
     @discardableResult
-    func quickSpin(agent: String, repoPath: String?) -> Screen {
+    func quickSpin(agent: String, repoPath: String?) -> Screen? {
         addScreen(name: nextScreenName(prefix: agent), repoPath: repoPath, branch: nil,
                   baseBranch: "main", paneCount: 1, command: agent)
+    }
+
+    // MARK: licensing
+
+    var freePaneLimit: Int { LicenseManager.product.freePaneLimit }
+    var totalPanes: Int { screens.reduce(0) { $0 + $1.panes.count } }
+
+    /// Panes past the free cap (in screen order) stay locked — shown, not spawned —
+    /// rather than being deleted, so downgrading never destroys a saved layout.
+    func isLocked(_ paneID: UUID) -> Bool {
+        if entitlement.isEntitled { return false }
+        var n = 0
+        for s in screens { for p in s.panes { if p.id == paneID { return n >= freePaneLimit }; n += 1 } }
+        return false
+    }
+
+    func requireUpgrade(_ reason: String) { flog("upgrade prompt: \(reason)"); upgradeReason = reason; showUpgrade = true }
+
+    func refreshEntitlement() {
+        let e = LicenseManager.currentEntitlement()
+        if e != entitlement { flog("entitlement: \(entitlement.label) -> \(e.label)"); entitlement = e }
+    }
+
+    /// Re-validates any stored license online, then recomputes entitlement.
+    func revalidateLicense() {
+        Task {
+            await LicenseManager.revalidate()
+            await MainActor.run { self.refreshEntitlement() }
+        }
+    }
+
+    func activateLicense(_ key: String) async -> String? {
+        let err = await LicenseManager.activate(key: key)
+        refreshEntitlement()
+        return err
+    }
+
+    func deactivateLicense() async -> String? {
+        let err = await LicenseManager.deactivate()
+        refreshEntitlement()
+        return err
+    }
+
+    // MARK: control channel
+    // ~/.config/fleet/control.json is a one-shot command file: {"cmd": "...", ...}.
+    // Lets the CLI (and the hard-test suite, which can't click) drive the app.
+
+    private var controlURL: URL { configDir.appendingPathComponent("control.json") }
+
+    private func processControlFile() {
+        guard let data = try? Data(contentsOf: controlURL) else { return }
+        try? FileManager.default.removeItem(at: controlURL)
+        guard let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let cmd = o["cmd"] as? String else { return }
+        let name = o["name"] as? String
+        let screen = screens.first { $0.name == name }
+        flog("control: \(cmd) \(name ?? "")")
+        switch cmd {
+        case "closeScreen": if let s = screen { closeScreen(s.id, removeWorktree: o["removeWorktree"] as? Bool ?? false) }
+        case "select": if let s = screen { activeScreenID = s.id }
+        case "activate":
+            let key = o["key"] as? String ?? ""
+            Task { let r = await self.activateLicense(key); flog("control: activate -> \(r ?? "OK")") }
+        case "setPaneCount": if let s = screen, let n = o["count"] as? Int { setPaneCount(n, in: s.id) }
+        case "addScreen":
+            addScreen(name: name ?? nextScreenName(prefix: "screen"), repoPath: o["repoPath"] as? String,
+                      branch: o["branch"] as? String, baseBranch: o["baseBranch"] as? String ?? "main",
+                      paneCount: o["panes"] as? Int ?? 1, command: o["command"] as? String ?? "claude")
+        default: break
+        }
     }
 
     // MARK: HUD onboarding
@@ -348,6 +450,7 @@ final class CockpitStore: ObservableObject {
     private func poll() {
         let paneCwds: [(UUID, String)] = screens.flatMap { s in s.panes.map { ($0.id, $0.cwd) } }
         pollCount += 1
+        refreshEntitlement()
         let prune = pollCount % 100 == 0   // roughly every ~5 minutes at a 3s interval
         Task.detached(priority: .utility) {
             let stats = SessionStats.all()

@@ -33,8 +33,11 @@ const HUD_SCRIPT = path.join(__dirname, '..', 'hud', 'statusline.sh');
 const GUI_HTML = path.join(__dirname, '..', 'gui', 'index.html');
 const CLAUDE_SETTINGS = path.join(HOME, '.claude', 'settings.json');
 
-const TRIAL_DAYS = 14;
-const FREE_PANE_LIMIT = 3;
+const PRODUCT = (() => {
+  try { return JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'product.json'), 'utf8')); } catch { return {}; }
+})();
+const TRIAL_DAYS = PRODUCT.trialDays || 14;
+const FREE_PANE_LIMIT = PRODUCT.freePaneLimit || 3;
 
 const DEFAULT_CONFIG = {
   session: 'fleet',
@@ -58,7 +61,7 @@ const DEFAULT_CONFIG = {
   hud: { enabled: true },       // show model · cost · context on pane borders
   templates: {},                // name → { panes:[…], layout?, power? }
   ui: { theme: 'aurora', banner: true },
-  license: { productId: '', apiBase: 'https://live.dodopayments.com' }
+  license: { productId: PRODUCT.productId || '', apiBase: PRODUCT.apiBase || 'https://live.dodopayments.com' }
 };
 
 const ACCENT_TMUX = {
@@ -170,6 +173,7 @@ function trialInfo() {
   return { active: days < TRIAL_DAYS, daysLeft: Math.max(0, TRIAL_DAYS - days) };
 }
 async function entitlement(cfg) {
+  if (fs.existsSync(path.join(CFG_DIR, 'owner'))) return { ok: true, kind: 'pro' };   // developer machine
   const v = await licenseValidate(cfg, { quiet: true });
   if (v.ok) return { ok: true, kind: 'pro' };
   const t = trialInfo();
@@ -595,7 +599,7 @@ async function licenseActivate(key, cfg) {
   try {
     const r = await postJSON(`${cfg.license.apiBase}/licenses/activate`, { license_key: key, name: os.hostname() });
     if (r.status >= 200 && r.status < 300) {
-      saveLicense({ key, instanceId: r.body.id || null, activatedAt: new Date().toISOString(), valid: true });
+      saveLicense({ key, instanceId: r.body.id || null, activatedAt: new Date().toISOString(), validatedAt: new Date().toISOString(), valid: true });
       good('license activated — thank you for supporting fleet ♥');
     } else {
       const m = { 403: 'key is inactive', 404: 'key not found', 422: 'activation limit reached — deactivate another device' }[r.status];
@@ -610,10 +614,11 @@ async function licenseValidate(cfg, { quiet = false } = {}) {
     const r = await postJSON(`${cfg.license.apiBase}/licenses/validate`,
       { license_key: lic.key, license_key_instance_id: lic.instanceId || undefined });
     const ok = r.status >= 200 && r.status < 300 && r.body.valid !== false;
+    if (ok) saveLicense({ ...lic, validatedAt: new Date().toISOString(), valid: true });
     if (!quiet) ok ? good('license valid') : fail('license invalid: ' + (r.body.message || r.status));
     return { ok, body: r.body };
   } catch {
-    const grace = Date.now() - Date.parse(lic.activatedAt || 0) < 7 * 864e5;
+    const grace = Date.now() - Date.parse(lic.validatedAt || lic.activatedAt || 0) < 7 * 864e5;
     if (!quiet) warn(`offline — ${grace ? '7-day grace active' : 'grace expired'}`);
     return { ok: grace, offline: true };
   }
@@ -916,11 +921,11 @@ async function main() {
 
     case 'buy': {
       banner(cfg);
-      const pid = cfg.license.productId;
+      const checkout = PRODUCT.checkoutUrl || (cfg.license.productId ? 'https://checkout.dodopayments.com/buy/' + cfg.license.productId : '');
       box('get fleet Pro', [
         `${c.dim('Pro unlocks ')} 4–16 panes · fleet watch · display profiles · templates`,
         `${c.dim('price       ')} one-time, see checkout`,
-        `${c.dim('checkout    ')} ${pid ? c.c('https://checkout.dodopayments.com/buy/' + pid) : c.dim('(set license.productId in config)')}`,
+        `${c.dim('checkout    ')} ${checkout ? c.c(checkout) : c.dim('(checkout not live yet — set checkoutUrl in product.json)')}`,
         `${c.dim('then        ')} ${c.c('fleet license activate <key>')}`
       ]);
       const t = trialInfo();

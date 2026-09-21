@@ -41,6 +41,18 @@ struct TerminalPane: NSViewRepresentable {
         return term
     }
 
+    /// SwiftTerm's deinit closes the PTY but deliberately never kills the child,
+    /// and since panes run without `exec` the agent is a *grandchild* of the
+    /// shell — so killing only the shell would orphan it. The shell is its own
+    /// session/process-group leader (forkpty), so signal the whole group.
+    static func dismantleNSView(_ nsView: LocalProcessTerminalView, coordinator: Coordinator) {
+        guard let pid = nsView.process?.shellPid, pid > 1 else { return }
+        flog("dismantle: killing process group \(pid)")
+        kill(-pid, SIGHUP)
+        kill(-pid, SIGTERM)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) { kill(-pid, SIGKILL) }
+    }
+
     func updateNSView(_ nsView: LocalProcessTerminalView, context: Context) {
         context.coordinator.onExit = onExit
         if focusRequest == pane.id {

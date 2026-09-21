@@ -26,6 +26,10 @@ done
 cp ../hud/statusline.sh "$APP/Contents/Resources/hud-statusline.sh"
 echo "▸ bundled hud-statusline.sh"
 
+# product id / checkout URL / trial length: one file, shared with the CLI
+cp ../product.json "$APP/Contents/Resources/product.json"
+echo "▸ bundled product.json"
+
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

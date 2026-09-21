@@ -14,6 +14,7 @@ struct CockpitView: View {
             VStack(spacing: 0) {
                 toolbar
                 Rectangle().fill(Theme.line).frame(height: 1)
+                planBanner
                 if !store.hudInstalled { hudOnboardingBanner }
                 ZStack {
                     ForEach(store.screens) { screen in
@@ -31,6 +32,28 @@ struct CockpitView: View {
         }
         .background(Theme.ground)
         .sheet(isPresented: $showingNewScreen) { NewScreenSheet(isPresented: $showingNewScreen) }
+        .sheet(isPresented: $store.showUpgrade) { UpgradeSheet() }
+    }
+
+    @ViewBuilder private var planBanner: some View {
+        switch store.entitlement {
+        case .free:
+            planBar("Free tier — \(store.freePaneLimit) panes. Your trial has ended.", "Upgrade")
+        case .trial(let d) where d <= 5:
+            planBar("Trial ends in \(d) day\(d == 1 ? "" : "s") — after that Fleet runs \(store.freePaneLimit) panes.", "Keep Pro")
+        default:
+            EmptyView()
+        }
+    }
+    private func planBar(_ text: String, _ cta: String) -> some View {
+        HStack(spacing: 10) {
+            Circle().fill(Theme.amber).frame(width: 6, height: 6)
+            Text(text).font(Theme.mono(11.5)).foregroundStyle(Theme.inkSoft)
+            Spacer()
+            FleetButton(title: cta, primary: true) { store.upgradeReason = ""; store.showUpgrade = true }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 7)
+        .background(Theme.panel2)
     }
 
     private var hudOnboardingBanner: some View {
@@ -188,8 +211,13 @@ private struct SidebarView: View {
             Spacer(minLength: 0)
             Rectangle().fill(Theme.line).frame(height: 1)
             HStack(spacing: 8) {
-                Circle().fill(Theme.accent).frame(width: 7, height: 7)
-                Text("fleet").font(Theme.mono(11, .medium)).foregroundStyle(Theme.inkSoft)
+                Button { store.upgradeReason = ""; store.showUpgrade = true } label: {
+                    HStack(spacing: 6) {
+                        Circle().fill(store.entitlement == .pro ? Theme.accent : Theme.amber).frame(width: 7, height: 7)
+                        Text(store.entitlement.label).font(Theme.mono(11, .medium)).foregroundStyle(Theme.inkSoft)
+                    }
+                }.buttonStyle(.plain)
+                    .help(store.entitlement == .pro ? "License" : "Upgrade or activate a license")
                 Spacer()
                 Text(String(format: "$%.2f", store.totalToday)).font(Theme.mono(11)).foregroundStyle(Theme.inkFaint)
             }
@@ -361,15 +389,31 @@ private struct PaneCell: View {
         // first line or two of real output — e.g. Claude Code's own banner.)
         VStack(spacing: 0) {
             header
-            TerminalPane(pane: pane, focusRequest: $store.focusRequest) { code in
-                exitCode = code; exited = true
+            if store.isLocked(pane.id) {
+                lockedPane
+            } else {
+                TerminalPane(pane: pane, focusRequest: $store.focusRequest) { code in
+                    exitCode = code; exited = true
+                }
+                .id("\(pane.id.uuidString)-\(restartToken)")   // bump = fresh PTY
+                .overlay { if exited { restartOverlay } }
             }
-            .id("\(pane.id.uuidString)-\(restartToken)")   // bump = fresh PTY
-            .overlay { if exited { restartOverlay } }
         }
         .clipped()
         .overlay(Rectangle().stroke(stat?.attention == true ? Theme.accent : Theme.line,
                                      lineWidth: stat?.attention == true ? 2 : 1))
+    }
+
+    private var lockedPane: some View {
+        ZStack {
+            Theme.ground
+            VStack(spacing: 10) {
+                Image(systemName: "lock.fill").font(.system(size: 16)).foregroundStyle(Theme.inkFaint)
+                Text("Over the free \(store.freePaneLimit)-pane limit").font(Theme.mono(11.5)).foregroundStyle(Theme.inkSoft)
+                Text("Layout kept — nothing was deleted.").font(Theme.mono(10)).foregroundStyle(Theme.inkFaint)
+                FleetButton(title: "Unlock", primary: true) { store.upgradeReason = ""; store.showUpgrade = true }
+            }
+        }
     }
 
     private var restartOverlay: some View {
@@ -506,5 +550,85 @@ private struct NewScreenSheet: View {
                          branch: branch.isEmpty ? nil : branch, baseBranch: baseBranch,
                          paneCount: paneCount, command: command == "custom" ? "claude" : command)
         isPresented = false
+    }
+}
+
+
+// MARK: - Upgrade / license sheet
+
+private struct UpgradeSheet: View {
+    @EnvironmentObject var store: CockpitStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var key = ""
+    @State private var busy = false
+    @State private var message: String? = nil
+    @State private var ok = false
+
+    private var checkout: URL? {
+        let u = LicenseManager.product.checkoutUrl
+        return u.isEmpty ? nil : URL(string: u)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Text("Fleet Pro").font(Theme.mono(15, .bold)).foregroundStyle(Theme.ink)
+                Circle().fill(store.entitlement == .pro ? Theme.accent : Theme.amber).frame(width: 5, height: 5)
+                Text(store.entitlement.label).font(Theme.mono(11)).foregroundStyle(Theme.inkFaint)
+            }
+            if !store.upgradeReason.isEmpty {
+                Text(store.upgradeReason).font(Theme.mono(11.5)).foregroundStyle(Theme.amber)
+            }
+
+            if store.entitlement == .pro {
+                Text("Thanks for supporting Fleet. Your license is active on this Mac and shared with the fleet CLI.")
+                    .font(.callout).foregroundStyle(Theme.inkSoft)
+                HStack {
+                    FleetButton(title: "Deactivate this Mac") {
+                        busy = true
+                        Task { message = await store.deactivateLicense(); ok = message == nil; busy = false
+                               if ok { message = "Deactivated — the seat is free to use elsewhere." } }
+                    }
+                    Spacer()
+                    FleetButton(title: "Done", primary: true) { dismiss() }
+                }
+            } else {
+                Text("Free runs \(store.freePaneLimit) panes. Pro is a one-time purchase: up to 16 panes per screen, unlimited screens, works on 3 of your Macs, includes every future 0.x update.")
+                    .font(.callout).foregroundStyle(Theme.inkSoft)
+
+                HStack {
+                    if let url = checkout {
+                        FleetButton(title: "Buy Fleet Pro", systemImage: "arrow.up.right", primary: true) { NSWorkspace.shared.open(url) }
+                    } else {
+                        Text("Checkout isn't live yet.").font(Theme.mono(11)).foregroundStyle(Theme.inkFaint)
+                    }
+                    Spacer()
+                }
+
+                Rectangle().fill(Theme.line).frame(height: 1)
+                Text("Already bought?").font(Theme.mono(11, .semibold)).foregroundStyle(Theme.inkFaint)
+                HStack {
+                    TextField("License key", text: $key).textFieldStyle(.roundedBorder).font(Theme.mono(12))
+                    FleetButton(title: busy ? "Activating…" : "Activate", primary: true) {
+                        busy = true; message = nil
+                        Task {
+                            let err = await store.activateLicense(key)
+                            busy = false; ok = err == nil
+                            message = err ?? "Activated — thank you!"
+                            if ok { DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { dismiss() } }
+                        }
+                    }.disabled(busy)
+                }
+                HStack { Spacer(); FleetButton(title: "Not now") { dismiss() } }
+            }
+
+            if let m = message {
+                Text(m).font(Theme.mono(11.5)).foregroundStyle(ok ? Theme.accent : Theme.red)
+            }
+        }
+        .padding(20)
+        .frame(width: 480)
+        .background(Theme.panel)
+        .foregroundStyle(Theme.ink)
     }
 }

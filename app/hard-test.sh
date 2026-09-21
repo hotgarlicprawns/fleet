@@ -31,7 +31,19 @@ kill_app_tree() {
 launch() { open Fleet.app; sleep "${1:-3}"; }
 
 [ -f "$APPJSON" ] && cp "$APPJSON" "$BACKUP"
-cleanup() { kill_app_tree; [ -f "$BACKUP" ] && mv "$BACKUP" "$APPJSON"; }
+LICBAK="$CFG_DIR/.hardtest-lic"
+rm -rf "$LICBAK"; mkdir -p "$LICBAK"
+for f in trial.json license.json owner; do [ -e "$CFG_DIR/$f" ] && cp -p "$CFG_DIR/$f" "$LICBAK/$f"; done
+# every section except 7c runs as an entitled owner; 7c manages entitlement itself
+touch "$CFG_DIR/owner"
+cleanup() {
+  kill_app_tree
+  [ -f "$BACKUP" ] && mv "$BACKUP" "$APPJSON"
+  for f in trial.json license.json owner; do
+    rm -f "$CFG_DIR/$f"; [ -e "$LICBAK/$f" ] && cp -p "$LICBAK/$f" "$CFG_DIR/$f"
+  done
+  rm -rf "$LICBAK"
+}
 trap cleanup EXIT
 
 echo "=== fleet Fleet.app hard-test suite ==="
@@ -182,6 +194,86 @@ else
 fi
 if pmset -g assertions | grep -qi fleet; then fail "power assertion leaked after clean quit"; else pass "power assertion released on clean quit"; fi
 for k in $kids; do if kill -0 "$k" 2>/dev/null; then fail "orphaned child $k after clean quit"; fi; done
+
+# ---------------------------------------------------------------------------
+section "7b. closing a screen / removing a pane kills its agents (no leaks)"
+ctl() { printf '%s' "$1" > "$CFG_DIR/control.json"; sleep 3; }
+python3 - > "$APPJSON" <<'PYEOF'
+import json
+def scr(n, secs, panes=1):
+    # compound command => the sleeper is a GRANDCHILD of the shell (the orphan case)
+    return {"name": n, "panes": [{"name": f"p{i}", "command": f"sleep {secs}{i}; sleep 0", "cwd": "/tmp"} for i in range(panes)]}
+json.dump({"screens": [scr("keep", 5100), scr("doomed", 5200), scr("shrink", 5300, 3)], "power": "Display on"}, open('/dev/stdout', 'w'))
+PYEOF
+launch 6
+alive() { pgrep -f "sleep $1" >/dev/null 2>&1; }
+if alive 51000 && alive 52000 && alive 53000 && alive 53001 && alive 53002; then pass "5 agents (grandchildren of their shells) running before close"; else fail "setup: expected agents not all running"; fi
+ctl '{"cmd":"closeScreen","name":"doomed"}'
+sleep 3
+if alive 52000; then fail "LEAK: agent of a closed screen is still running (orphaned)"; else pass "closing a screen kills its agent (process group, incl. grandchild)"; fi
+if alive 51000 && alive 53000; then pass "other screens' agents untouched"; else fail "closing one screen killed another's agent"; fi
+ctl '{"cmd":"setPaneCount","name":"shrink","count":1}'
+sleep 3
+if alive 53001 || alive 53002; then fail "LEAK: removed panes' agents still running"; else pass "removing panes kills their agents"; fi
+if alive 53000; then pass "remaining pane survives a shrink"; else fail "shrink killed the surviving pane"; fi
+kill_app_tree
+pkill -f "sleep 5[123]0" 2>/dev/null; true
+
+# ---------------------------------------------------------------------------
+section "7c. licensing: free-tier cap, trial, unlock, lapse, activation errors"
+sleepers() { python3 - "$@" > "$APPJSON" <<'PYEOF'
+import json, sys
+n = int(sys.argv[1])
+json.dump({"screens": [{"name": "lic", "panes": [
+    {"name": f"p{i}", "command": f"sleep 610{i}; sleep 0", "cwd": "/tmp"} for i in range(n)]}],
+    "power": "Display on"}, open('/dev/stdout', 'w'))
+PYEOF
+}
+trial_ago() { python3 -c "import json,datetime;json.dump({'startedAt':(datetime.datetime.utcnow()-datetime.timedelta(days=$1)).strftime('%Y-%m-%dT%H:%M:%S.000Z')},open('$CFG_DIR/trial.json','w'))"; }
+alive() { pgrep -f "sleep $1" >/dev/null 2>&1; }
+reset_lic() { rm -f "$CFG_DIR/license.json" "$CFG_DIR/owner"; }
+
+# 1. trial expired + no license => Free: only 3 of 5 panes run; the rest stay locked (not deleted)
+reset_lic; trial_ago 30; sleepers 5; rm -f "$CFG_DIR/app-debug.log"; launch 6
+if alive 6100 && alive 6101 && alive 6102; then pass "free tier: first 3 panes run"; else fail "free tier: first 3 panes not running"; fi
+if alive 6103 || alive 6104; then fail "free tier: panes beyond the cap were spawned"; else pass "free tier: panes 4-5 are locked (no agent spawned)"; fi
+python3 -c "import json;d=json.load(open('$APPJSON'));assert sum(len(s['panes']) for s in d['screens'])==5" \
+  && pass "locked panes are kept in the layout, not deleted" || fail "locked panes were deleted from the saved layout"
+
+# 2. activating unlocks live (owner marker stands in for a paid license here)
+touch "$CFG_DIR/owner"; sleep 7
+if alive 6103 && alive 6104; then pass "unlock: locked panes start as soon as entitlement flips"; else fail "unlock did not start locked panes"; fi
+
+# 3. lapse re-locks and kills the now-locked agents (no orphans)
+rm -f "$CFG_DIR/owner"; sleep 7
+if alive 6103 || alive 6104; then fail "lapse: locked agents still running"; else pass "lapse: over-cap agents are stopped again"; fi
+if alive 6100 && alive 6101 && alive 6102; then pass "lapse: first 3 panes keep running"; else fail "lapse killed panes inside the cap"; fi
+
+# 4. free tier blocks adding screens past the cap and prompts
+rm -f "$CFG_DIR/app-debug.log"
+ctl '{"cmd":"addScreen","name":"blocked","panes":1,"command":"sleep 6199; sleep 0"}'
+grep -q "upgrade prompt" "$CFG_DIR/app-debug.log" && pass "free tier: adding past the cap shows the upgrade prompt" || fail "no upgrade prompt when adding past the cap"
+alive 6199 && fail "free tier: a screen was created past the cap" || pass "free tier: no agent spawned for the blocked screen"
+kill_app_tree; pkill -f "sleep 61" 2>/dev/null
+
+# 5. active trial => everything runs
+trial_ago 2; sleepers 5; launch 6
+if alive 6100 && alive 6104; then pass "active trial: all 5 panes run"; else fail "active trial: panes missing"; fi
+kill_app_tree; pkill -f "sleep 61" 2>/dev/null
+
+# 6. activation failure paths (deterministic: unreachable server; live: bogus key)
+rm -f "$CFG_DIR/app-debug.log"
+open --env FLEET_LICENSE_API=http://127.0.0.1:9 Fleet.app; sleep 4
+ctl '{"cmd":"activate","key":"NOT-A-KEY"}'; sleep 2
+grep -q "Couldn't reach the license server" "$CFG_DIR/app-debug.log" && pass "activate: unreachable server -> clear message, no crash" || fail "activate: unreachable server not handled"
+[ -e "$CFG_DIR/license.json" ] && fail "a failed activation wrote license.json" || pass "failed activation leaves no license behind"
+kill_app_tree
+rm -f "$CFG_DIR/app-debug.log"
+launch 4; ctl '{"cmd":"activate","key":"NOT-A-REAL-KEY-000"}'; sleep 3
+if grep -q "Key not found" "$CFG_DIR/app-debug.log"; then pass "activate: bogus key rejected by the live Dodo endpoint (404 -> 'Key not found')"
+elif grep -q "Couldn't reach" "$CFG_DIR/app-debug.log"; then skip "activate live check: no network from this machine"
+else fail "activate: unexpected result for a bogus key: $(grep 'control: activate' "$CFG_DIR/app-debug.log")"; fi
+kill_app_tree
 
 # ---------------------------------------------------------------------------
 section "8. UI automation (tab switch, resize) — needs Accessibility permission"
