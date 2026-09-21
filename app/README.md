@@ -1,4 +1,4 @@
-# Fleet.app (v0.1 prototype)
+# Fleet.app (v0.3)
 
 A native macOS cockpit for running several coding agents (Claude Code, Codex,
 anything else) at once — organized into **Screens**, each an independent
@@ -59,13 +59,37 @@ Config: `~/.config/fleet/app.json` — `screens[]`, each with `panes[]`
 Edited by the app; hand-editing is safe (missing fields fall back to sane
 defaults; a legacy single-screen `{panes:[...]}` file is migrated on load).
 
-## Known rough edges (v0.1)
+## Also in the app
 
-- No visual QA pass yet — built and driven headlessly (process/PTY/config
-  checks) in an environment without screen-recording permission. If a layout
-  looks off, it's unverified, not deliberate.
-- Ad-hoc signed only; not notarized. Fine for local use, not for distributing
-  outside this Mac yet.
-- One tab bar per app window; no separate OS windows per screen yet.
-- Sync/push need a working `origin` remote — untested against one in this
-  environment (the fleet repo itself has none).
+- **Menu bar + hotkey** — a menu-bar item (waiting count, today's spend, jump to
+  any screen) and a global ⌃⌥F to bring Fleet forward. Closing the window
+  *hides* it: the agents keep running. ⌘Q quits.
+- **Licensing** — 14-day trial, then 3 panes free; see the root README.
+- **Spend report** — per project, last 24h and 7 days.
+- **Safe close** — closing a git-backed screen offers to remove its worktree;
+  removal never uses `--force`, so uncommitted work is never destroyed.
+- **Resume** — a pane whose process ended offers Restart, or "Resume last chat"
+  (`claude --continue`) for Claude panes.
+- **Control channel** — write `{"cmd": ...}` to `~/.config/fleet/control.json`
+  (closeScreen, addScreen, select, setPaneCount, summon, ...). Used by the
+  test suite, which can't click.
+
+## Build, test, package
+
+```bash
+./build-app.sh          # Fleet.app, ad-hoc signed
+./hard-test.sh          # ~5 min: leaks, licensing, worktrees, load, crash, window behaviour
+./make-dmg.sh           # Fleet-<version>.dmg (signs + notarizes when FLEET_SIGN_ID / FLEET_NOTARY_PROFILE are set)
+```
+
+## Known rough edges
+
+- Ad-hoc signed unless you set `FLEET_SIGN_ID`; a build for other Macs needs
+  your Apple Developer ID and notarization.
+- The HUD (cost, context, 5h/7d limits, waiting state) reads Claude Code's
+  status-line hook, so Codex panes are plain terminals.
+- Sync/push are plain git and were verified against a local bare remote, not a
+  hosted one.
+- Tab/resize/display-unplug automation needs Accessibility permission and is
+  still a manual check (see TESTING.md).
+- The window is one per app; screens are sidebar entries, not separate OS windows.

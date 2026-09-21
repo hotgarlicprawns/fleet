@@ -1,4 +1,5 @@
 .build/
 Fleet.app/
+*.dmg
 *.xcodeproj/
 .swiftpm/

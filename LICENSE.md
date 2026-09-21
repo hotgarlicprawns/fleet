@@ -28,14 +28,14 @@ PLUGIN.
 
 ---
 
-## 2. The fleet CLI (`bin/`, `hud/`, `gui/`) — End User License Agreement
+## 2. The fleet CLI and Fleet.app (`bin/`, `hud/`, `gui/`, `app/`) — End User License Agreement
 
 Copyright (c) 2026 bishesh. All rights reserved.
 
 ### Grant
 
 On purchase of a valid license key, you are granted a non-exclusive,
-non-transferable license to install and use the fleet CLI ("the Software")
+non-transferable license to install and use the fleet CLI and Fleet.app ("the Software")
 on the number of devices permitted by your license tier, for your own
 personal or internal business use.
 

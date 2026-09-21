@@ -3,23 +3,33 @@
 Run the whole automated suite yourself any time:
 
 ```bash
-./hard-test.sh      # ~90s, backs up and restores your real app.json, exits non-zero on any failure
-./soak-test.sh &    # long-running RSS/CPU/FD monitor — see its header for how to check it later
+./hard-test.sh          # ~12 min. Backs up + restores your app.json and license/trial files.
+./soak-test.sh &        # separate instance + config; see its header. `./soak-test.sh stop` ends it.
 ```
 
-`hard-test.sh` covers everything below except real UI clicks (needs
-Accessibility permission — see the script's section 8 for exactly how to
-grant it, then re-run). Last run: **16 passed, 0 failed, 1 skipped**,
-reproducible across repeats.
+Last full run: **46 passed, 0 failed, 1 skipped** (the skip is real UI automation, which
+needs Accessibility permission). The suite runs as an entitled "owner" except section 7c,
+which manages entitlement itself; it can't click, so it drives the app through a small
+control file (`~/.config/fleet/control.json`).
 
-What's been load-tested headlessly (no screen-recording/accessibility
-permission in the build environment, so this is process/resource-level, not
-visual), what it found, and what you should click through yourself.
+Sections: 1 build · 2 config resilience · 3 load (36 PTYs) · 4 kill -9 · 5 git worktrees + real
+remote · 6 polling scale · 7 clean quit · 7b close/shrink kills agents · 7d safe worktree
+cleanup · 7e window hide/summon/hotkey · 7c licensing (12 checks incl. live Dodo endpoint) · 8 UI.
+
+**Known unexplained flake:** in one full run, 7e failed four checks (no visible window, pane
+never spawned) and then passed on every rerun — alone, after 7d, and in two more full runs,
+plus 12/12 clean back-to-back launches. Suspected cause: SwiftUI occasionally not opening the
+main window at launch. A self-heal now opens it explicitly (and logs "main window missing after
+launch"); it has never fired in testing, so the root cause is unconfirmed. If 7e ever fails
+again, `/tmp/fleet-7e-fail.log` holds the app log.
 
 ## Results so far
 
 | Test | Setup | Result |
 |---|---|---|
+| Agents die with their screen | 3 screens, compound command so the agent is a *grandchild* of its shell | closing a screen and removing panes kill the whole process group; mutation-tested (disabling the fix fails both checks) |
+| Licensing | trial expired / active / owner, over-cap panes, bogus keys | free cap locks panes without deleting them; unlock/lapse flip live; blocked adds prompt; unreachable server and a bogus key against the live Dodo endpoint both handled |
+| Worktree cleanup | clean + dirty worktree, agent inside | clean one removed after its agent stopped; the one with uncommitted work is kept, file intact |
 | Many concurrent panes | 6 screens × 6 panes = 36 real PTYs | 36/36 spawned; ~400MB RSS at startup settling to ~155MB idle; CPU near 0% once idle; 81 FDs held (limit 61,440/process) |
 | Sustained run | same 36 panes, watched over several minutes | no memory growth, no crash, all children stayed alive |
 | Clean quit | quit the app normally | power assertion released, no orphaned child processes |

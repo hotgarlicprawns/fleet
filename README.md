@@ -1,9 +1,16 @@
 # fleet
 
-**Many Claude Code terminals, one tiled screen** — with the cost and context of
-every session on its pane border, a machine that stays awake through long runs,
-and a screen that blanks *without touching your monitor arrangement* (the thing
-that matters when your laptop's built-in panel is dead).
+**A tiled cockpit for Claude Code and Codex on macOS** — a screen per task (each
+on its own git worktree), the cost, context and rate limits of every session on
+its pane, and a Mac that stays awake through long runs without touching your
+monitor arrangement (the thing that matters when your laptop's built-in panel is
+dead).
+
+Two ways to run it, sharing one config (`~/.config/fleet/`) and one license:
+
+- **Fleet.app** — the native app (`app/`): sidebar of projects and screens, real
+  terminals, menu-bar item, ⌃⌥F hotkey. See [app/README.md](app/README.md).
+- **`fleet` CLI** — the tmux-based version, for SSH and terminal purists.
 
 ```
 fleet up             # tiled grid of `claude` sessions + power management + HUD
@@ -16,24 +23,22 @@ fleet down           # tear it all down
 ## Install
 
 ```bash
-git clone <repo> && cd fleet && npm link      # or: npm i -g @fleet/cli
-brew install tmux                              # required
-brew install jq                                # optional — faster HUD
-brew install displayplacer                     # optional — display profiles
+# the app
+cd app && ./make-dmg.sh && open Fleet-*.dmg        # drag Fleet to Applications
 
-fleet hud install    # wire the cost + context HUD into Claude Code
-fleet gui            # settings + status panel in your browser
-fleet config         # …or configure from the terminal
+# the CLI
+npm i -g fleet-cockpit        # (or, from a clone: npm link)
+brew install tmux             # required by the CLI
+brew install jq               # optional — faster HUD
+brew install displayplacer    # optional — display profiles
+
+fleet hud install    # wire the cost + context HUD into Claude Code (the app has a one-click banner)
+fleet config         # panes, power mode, budget, theme — or `fleet gui` in a browser
 fleet up
 ```
 
-## GUI
-
-`fleet gui` opens a local control panel (`127.0.0.1:7787`, localhost-only, no
-dependencies) to launch/tear down the grid, switch power mode, blank the
-screen, install the HUD, rename panes, and set budget thresholds — writing the
-same `~/.config/fleet/config.json`. It's also the panel a future menubar app
-wraps.
+`fleet gui` opens a small local control panel (`127.0.0.1:7787`, localhost-only)
+for the CLI's config; the app has its own settings built in.
 
 Claude Code plugin (auto power-management + attention flags per session):
 
@@ -107,45 +112,63 @@ displays, or (opt-in) applies a `displayplacer` profile you saved yourself.
 Cursor settings, and fleet sessions cap tmux `history-limit` at 8000 lines.
 Inside Claude Code you can also run `/terminal-setup`.
 
-## Pricing
+## Pricing & licensing
 
 14-day full trial, no card. Then:
 
-| | Free | Pro — one-time |
+| | Free | Pro — one-time ($24 launch, $39 after) |
 |---|---|---|
-| Panes | 3 | 16 |
-| Power | `awake-on`, `off` | all + `fleet watch` |
-| HUD + `fleet report` | ✓ | ✓ |
-| Templates, display profiles | — | ✓ |
-| Themes | aurora | all |
+| Panes | 3 in total (app) / 3 per `fleet up` (CLI) | up to 16 per screen, unlimited screens |
+| HUD, spend report, git-worktree screens | ✓ | ✓ |
+| Menu-bar item, ⌃⌥F hotkey | ✓ | ✓ |
+| Smart-blank, display profiles, templates (CLI) | — | ✓ |
+| Devices | — | 3 Macs |
+
+The app and the CLI share `~/.config/fleet/trial.json` and `license.json`, so
+one purchase unlocks both. Past the free cap the app keeps your layout and
+shows the extra panes as locked placeholders — nothing is deleted, no agent is
+started — and unlocking (or activating a key) starts them live.
 
 ```
 fleet buy                        # checkout link
-fleet license activate <key>     # public Dodo Payments endpoints, 7-day offline grace
+fleet license activate <key>     # or: Fleet.app > sidebar plan badge > Activate
 fleet license deactivate         # free the seat when switching machines
 ```
 
+Keys are checked against Dodo Payments' public endpoints (no secret ships in
+either client) with a 7-day offline grace. Client-side checks deter casual
+sharing; they are not DRM.
+
+**`product.json`** is the single place to set the checkout URL, API host, trial
+length and free limit; the app bundles it and the CLI reads it. Until
+`checkoutUrl` is filled in, the upgrade sheet says checkout isn't live.
+
+**Owner override:** `touch ~/.config/fleet/owner` treats that Mac as Pro in both
+the app and the CLI (for the developer's own machine and the test suite).
+
 ## Distribution
 
-- **now** — `npm i -g @fleet/cli` + a Homebrew tap. Zero signing cost, the
-  install path devs expect, instant updates. Paid via license key.
-- **`app/`** — a native SwiftUI cockpit (v0.1 prototype, see [app/README.md](app/README.md)):
-  Screens (tabs), each with its own tiled terminal grid and, optionally, its
-  own git worktree/branch, so independent agents never share a working tree.
-  Real PTYs via SwiftTerm, native power assertions (no `caffeinate`), a
-  display picker that survives a dead/removed monitor. Signed + notarized
-  `.dmg` distribution is the next step, once this is proven out.
+| Artifact | How | Status |
+|---|---|---|
+| `Fleet-<v>.dmg` | `app/make-dmg.sh` (ad-hoc), or with `FLEET_SIGN_ID` + `FLEET_NOTARY_PROFILE` for a signed, notarized build | script tested unsigned; signing/notarizing needs your Developer ID |
+| `fleet-cockpit` on npm | `npm publish` (tarball verified: 17 files, installs and runs from a clean prefix) | unpublished |
+| Homebrew | `packaging/homebrew/` — a formula (CLI) and a cask (app), both with placeholders | untested until artifacts exist |
+| Release automation | `.github/workflows/release.yml` — tag `v*` builds, signs, notarizes, releases, publishes | written, not yet run |
+
+Naming note: `fleet` is also JetBrains Fleet and Rancher Fleet; the Homebrew
+cask is therefore `fleet-cockpit`, and the npm package is `fleet-cockpit`.
 
 ## License
 
 - `plugin/` — MIT
-- `bin/`, `hud/`, `gui/` — commercial EULA, see [LICENSE.md](LICENSE.md).
+- `bin/`, `hud/`, `gui/`, `app/` — commercial EULA, see [LICENSE.md](LICENSE.md).
   14-day trial, then Free tier or a paid key. 30-day refund.
 
 ## Roadmap
 
-- Menubar `.dmg` app around `fleet gui`
-- Global summon hotkey (skhd recipe today)
+- Resume a killed Claude session automatically on relaunch (manual "Resume last chat" exists)
+- Attention/HUD for Codex panes (today the HUD is Claude Code only)
+- Drag to reorder / resize panes (the grid is equal-split)
 - Linux (`systemd-inhibit` + tmux)
 - WezTerm / kitty native-split backend
 - Team cost dashboard

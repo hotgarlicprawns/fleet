@@ -38,8 +38,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>Fleet</string>
   <key>CFBundleDisplayName</key><string>Fleet</string>
   <key>CFBundleIdentifier</key><string>sh.fleet.cockpit</string>
-  <key>CFBundleVersion</key><string>0.1.0</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleVersion</key><string>__VERSION__</string>
+  <key>CFBundleShortVersionString</key><string>__VERSION__</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>Fleet</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
@@ -49,6 +49,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+sed -i '' "s/__VERSION__/$(cat VERSION)/g" "$APP/Contents/Info.plist"
 
 codesign --force --deep --sign - "$APP" 2>/dev/null || echo "▸ (codesign skipped)"
 echo "▸ built $APP"

@@ -1,0 +1,62 @@
+# Release on tag (v*): build + sign + notarize the dmg, attach it to a GitHub release,
+# publish the CLI to npm. NOTE: written but not yet run — first tag will be its test.
+#
+# Secrets needed:
+#   MACOS_CERT_P12_BASE64   Developer ID Application cert + key, exported as .p12, base64-encoded
+#   MACOS_CERT_PASSWORD     password used when exporting the .p12
+#   FLEET_SIGN_ID           e.g. "Developer ID Application: Your Name (TEAMID)"
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD   for notarytool
+#   NPM_TOKEN               npm automation token
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Import signing certificate
+        env:
+          CERT: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          PASS: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KC="$RUNNER_TEMP/build.keychain-db"
+          security create-keychain -p tmp "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p tmp "$KC"
+          echo "$CERT" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$PASS" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k tmp "$KC"
+          security list-keychains -d user -s "$KC" login.keychain-db
+
+      - name: Store notary credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: xcrun notarytool store-credentials fleet-notary --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+
+      - name: Check tag matches app/VERSION
+        run: test "v$(cat app/VERSION)" = "${GITHUB_REF_NAME}"
+
+      - name: Build, sign, notarize dmg
+        env:
+          FLEET_SIGN_ID: ${{ secrets.FLEET_SIGN_ID }}
+          FLEET_NOTARY_PROFILE: fleet-notary
+        run: app/make-dmg.sh
+
+      - name: GitHub release
+        run: gh release create "$GITHUB_REF_NAME" "app/Fleet-$(cat app/VERSION).dmg" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, registry-url: "https://registry.npmjs.org" }
+      - name: Publish CLI
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,10 +1,36 @@
 {
-  "name": "@fleet/cli",
-  "version": "0.2.0",
-  "description": "Organise many Claude Code terminals in one tiled screen; keep the machine awake for long sessions without touching your monitor arrangement.",
-  "bin": { "fleet": "bin/fleet.js" },
-  "engines": { "node": ">=18" },
-  "os": ["darwin"],
+  "name": "fleet-cockpit",
+  "version": "0.3.0",
+  "description": "A tiled cockpit for Claude Code and Codex on macOS: per-session cost/context HUD, git-worktree screens, stay-awake power control.",
+  "bin": {
+    "fleet": "bin/fleet.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin"
+  ],
   "license": "SEE LICENSE IN LICENSE.md",
-  "files": ["bin", "hud", "gui", "plugin", "README.md", "LICENSE.md"]
+  "files": [
+    "bin",
+    "hud",
+    "gui",
+    "plugin",
+    "product.json",
+    "README.md",
+    "LICENSE.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/REPLACE-ME/fleet.git"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "tmux",
+    "macos",
+    "terminal",
+    "ai-agents"
+  ]
 }

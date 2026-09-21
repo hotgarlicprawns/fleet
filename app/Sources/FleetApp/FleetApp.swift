@@ -101,11 +101,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
 private struct MenuBarLabel: View {
     @EnvironmentObject var store: CockpitStore
+    @Environment(\.openWindow) private var openWindow
     var body: some View {
         let waiting = store.screens.reduce(0) { $0 + store.waitingCount($1) }
         HStack(spacing: 3) {
             Image(systemName: waiting > 0 ? "square.grid.2x2.fill" : "square.grid.2x2")
             if waiting > 0 { Text("\(waiting)") }
+        }
+        // Self-heal: this label exists from launch. If SwiftUI did not open the
+        // main window (seen intermittently), open it explicitly.
+        .task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if NSApp.windows.first(where: { $0.title == "fleet" }) == nil {
+                flog("main window missing after launch — opening it explicitly")
+                openWindow(id: "cockpit")
+            }
         }
     }
 }

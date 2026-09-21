@@ -28,7 +28,11 @@ kill_app_tree() {
   kill -9 "$p" 2>/dev/null
   sleep 1
 }
-launch() { open Fleet.app; sleep "${1:-3}"; }
+launch() {
+  # a leftover instance would make `open` merely re-activate it (with the OLD config)
+  if [ -n "$(app_pid)" ]; then echo "     (note: stray Fleet instance found before launch — killed)"; kill_app_tree; fi
+  open Fleet.app; sleep "${1:-3}"
+}
 
 [ -f "$APPJSON" ] && cp "$APPJSON" "$BACKUP"
 LICBAK="$CFG_DIR/.hardtest-lic"
@@ -51,12 +55,14 @@ echo "log: $CFG_DIR/app-debug.log"
 
 # ---------------------------------------------------------------------------
 section "1. build"
-if swift build 2>&1 | tee /tmp/fleet-swiftbuild.log | grep -q "Build complete"; then
+swift build > /tmp/fleet-swiftbuild.log 2>&1 || true
+if grep -q "Build complete" /tmp/fleet-swiftbuild.log; then
   pass "swift build"
 else
   fail "swift build — see /tmp/fleet-swiftbuild.log"; exit 1
 fi
-if ./build-app.sh 2>&1 | tee /tmp/fleet-buildapp.log | grep -q "built Fleet.app"; then
+./build-app.sh > /tmp/fleet-buildapp.log 2>&1 || true
+if grep -q "built Fleet.app" /tmp/fleet-buildapp.log; then
   pass "app bundle assembled"
 else
   fail "app bundle assembly — see /tmp/fleet-buildapp.log"; exit 1
@@ -251,6 +257,7 @@ kill_app_tree; pkill -f "sleep 63" 2>/dev/null
 ( cd "$G" && git worktree prune ); rm -rf "$G" "$G-worktrees"
 
 # ---------------------------------------------------------------------------
+FAIL_BEFORE_7E=$FAIL
 section "7e. window close hides (agents keep running); hotkey; summon"
 python3 - > "$APPJSON" <<'PYEOF'
 import json
@@ -270,6 +277,7 @@ ctl '{"cmd":"summon"}'
 ctl '{"cmd":"windowState"}'
 tail -1 "$CFG_DIR/app-debug.log" | grep -q "visible=true" && pass "summon brings the window back" || fail "summon did not restore the window"
 alive 6401 && pass "agent survived hide + summon (same session)" || fail "agent lost across hide/summon"
+[ "$FAIL" -gt "${FAIL_BEFORE_7E:-0}" ] && cp "$CFG_DIR/app-debug.log" /tmp/fleet-7e-fail.log 2>/dev/null
 kill_app_tree; pkill -f "sleep 6401" 2>/dev/null
 
 # ---------------------------------------------------------------------------
