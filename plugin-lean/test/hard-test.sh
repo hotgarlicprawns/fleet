@@ -114,12 +114,18 @@ CHECKSUM_AFTER=$(shasum "$T/ambig.txt")
   || fail "ambiguity guard did not behave as expected"
 
 echo "     mutation test: disabling the guard should make this fail —"
-cp server/index.js /tmp/fleet-lean-index.js.bak
+# mutate a SCRATCH COPY of the server, never the shipped file in place — an
+# earlier version patched server/index.js itself with no trap, so a killed
+# test run could leave the real, shipped server mutated. Belt-and-suspenders:
+# a trap restores it too, in case anything below is ever changed to touch it.
+MUT_SERVER="$T/index.mutated.js"
+cp server/index.js "$MUT_SERVER"
+trap 'rm -f "$MUT_SERVER"' EXIT
 python3 -c "
-s = open('server/index.js').read()
+s = open('$MUT_SERVER').read()
 old = '''      if (matches.length > 1 && e.occurrence == null) {
         failures.push({
-          file, find: e.find.slice(0, 80),
+          file: displayFile, find: e.find.slice(0, 80),
           error: \`ambiguous: \${matches.length} matches found — pass \"occurrence\" to disambiguate\`,
           matchedLines: matches.map(m => m.start + 1)
         });
@@ -127,7 +133,7 @@ old = '''      if (matches.length > 1 && e.occurrence == null) {
       }'''
 assert old in s, 'could not find the guard to mutate — check the source has not moved'
 s = s.replace(old, '      // MUTATED: ambiguity guard disabled for this test run', 1)
-open('server/index.js', 'w').write(s)
+open('$MUT_SERVER', 'w').write(s)
 "
 cat > "$T/ambig2.txt" <<'EOF'
 retry(1);
@@ -137,13 +143,11 @@ teardown();
 EOF
 CHECKSUM_MUT_BEFORE=$(shasum "$T/ambig2.txt")
 node -e "
-const { leanEdit } = require('$SERVER');
+const { leanEdit } = require('$MUT_SERVER');
 leanEdit({ edits: [{ file: '$T/ambig2.txt', find: 'retry(1);', replace: 'retry(2);' }] });
 "
 CHECKSUM_MUT_AFTER=$(shasum "$T/ambig2.txt")
-cp /tmp/fleet-lean-index.js.bak server/index.js
-rm -f /tmp/fleet-lean-index.js.bak
-node -c "$SERVER" || { fail "server did not restore cleanly after mutation test"; }
+rm -f "$MUT_SERVER"
 if [ "$CHECKSUM_MUT_BEFORE" != "$CHECKSUM_MUT_AFTER" ]; then
   pass "mutation test: with the guard removed, the file DOES get modified (confirms the test is real)"
 else
@@ -257,6 +261,110 @@ else
   fail "expected an honest refusal, got: $RESULT"
 fi
 rm -rf "$LIC_DIR"
+
+# ---------------------------------------------------------------------------
+section "10. lean_edit safety regressions (found by an Opus review, 2026-09-23)"
+# Each of these reproduced a real silent-corruption bug before the exact-
+# match-by-default rewrite. Kept as permanent regressions, not scratch checks.
+SAFETY_DIR=$(mktemp -d)
+node -e "
+const { leanEdit } = require('$SERVER');
+const fs = require('fs');
+const D = '$SAFETY_DIR';
+let pass = 0, fail = 0;
+function check(name, cond) { if (cond) { console.log('  PASS  ' + name); pass++; } else { console.log('  FAIL  ' + name); fail++; } }
+
+// short find string no longer fuzzy-matches a different value by default
+fs.writeFileSync(D+'/a.js', 'retry(2);\n');
+let r = leanEdit({ edits: [{ file: D+'/a.js', find: 'retry(1);', replace: 'retry(99);' }] });
+check('short find text no longer fuzzy-matches an unrelated value', r.ok === false && fs.readFileSync(D+'/a.js','utf8').includes('retry(2);'));
+
+// stale find text doesn't revert a since-changed block
+fs.writeFileSync(D+'/b.js', 'const cfg = {\n  maxRetries: 5,\n  timeoutMs: 2000,\n};\n');
+r = leanEdit({ edits: [{ file: D+'/b.js', find: 'const cfg = {\n  maxRetries: 3,\n  timeoutMs: 1000,\n};', replace: 'changed' }] });
+check('stale find text does not silently revert a changed block', r.ok === false && fs.readFileSync(D+'/b.js','utf8').includes('maxRetries: 5'));
+
+// overlapping edits in one batch rejected, not silently corrupting
+fs.writeFileSync(D+'/c.js', 'a\nb\nc\nd\n');
+r = leanEdit({ edits: [
+  { file: D+'/c.js', find: 'a\nb\nc', replace: 'ABC' },
+  { file: D+'/c.js', find: 'b\nc\nd', replace: 'BCD' }
+]});
+check('overlapping edits in one batch rejected, file untouched', r.ok === false && fs.readFileSync(D+'/c.js','utf8') === 'a\nb\nc\nd\n');
+
+// same file, two path spellings -> one write target, not a lost edit
+fs.writeFileSync(D+'/d.js', 'one\ntwo\n');
+r = leanEdit({ edits: [
+  { file: D+'/d.js', find: 'one', replace: 'ONE' },
+  { file: D+'/./d.js', find: 'two', replace: 'TWO' }
+]});
+const dc = fs.readFileSync(D+'/d.js','utf8');
+check('same file via two path spellings: both edits land, none lost', r.ok === true && dc.includes('ONE') && dc.includes('TWO'));
+
+// batch atomicity across FILES, not just across matches: a read-only second
+// file must block the whole batch, including the first (writable) file
+fs.writeFileSync(D+'/e1.js', 'hello\n');
+fs.writeFileSync(D+'/e2.js', 'world\n');
+fs.chmodSync(D+'/e2.js', 0o444);
+r = leanEdit({ edits: [
+  { file: D+'/e1.js', find: 'hello', replace: 'HELLO' },
+  { file: D+'/e2.js', find: 'world', replace: 'WORLD' }
+]});
+fs.chmodSync(D+'/e2.js', 0o644);
+check('read-only file blocks the whole batch (real cross-file atomicity)', r.ok === false && fs.readFileSync(D+'/e1.js','utf8') === 'hello\n');
+
+// tab indentation preserved exactly, not corrupted by space-count math
+fs.writeFileSync(D+'/f.py', 'def f():\n\tif x:\n\t\treturn 1\n');
+r = leanEdit({ edits: [{ file: D+'/f.py', find: 'return 1', replace: 'return 2' }] });
+check('tab-indented file: indentation preserved exactly', r.ok === true && fs.readFileSync(D+'/f.py','utf8') === 'def f():\n\tif x:\n\t\treturn 2\n');
+
+// CRLF preserved throughout, not mixed with bare LF
+fs.writeFileSync(D+'/g.js', 'function f() {\r\n  return 1;\r\n}\r\n');
+r = leanEdit({ edits: [{ file: D+'/g.js', find: 'return 1;', replace: 'return 2;' }] });
+check('CRLF file: line endings stay CRLF throughout, not mixed', r.ok === true && fs.readFileSync(D+'/g.js','utf8') === 'function f() {\r\n  return 2;\r\n}\r\n');
+
+// non-UTF-8 file refused rather than corrupted on write-back
+const latin1 = Buffer.from([0x63, 0x61, 0x66, 0xE9]);
+fs.writeFileSync(D+'/h.txt', latin1);
+r = leanEdit({ edits: [{ file: D+'/h.txt', find: 'caf', replace: 'bar' }] });
+check('non-UTF-8 file refused, bytes untouched', r.ok === false && fs.readFileSync(D+'/h.txt').equals(latin1));
+
+// empty find rejected outright
+fs.writeFileSync(D+'/i.txt', 'content\n');
+r = leanEdit({ edits: [{ file: D+'/i.txt', find: '', replace: 'INJECTED' }] });
+check('empty find string rejected', r.ok === false && fs.readFileSync(D+'/i.txt','utf8') === 'content\n');
+
+process.exitCode = fail === 0 ? 0 : 1;
+console.log(pass + ' internal checks passed, ' + fail + ' failed');
+"
+if [ $? -eq 0 ]; then pass "all 8 safety regressions from the review hold"; else fail "one or more safety regressions reappeared — see output above"; fi
+rm -rf "$SAFETY_DIR"
+
+# ---------------------------------------------------------------------------
+section "11. lean_search: brace-hang and generated-file-crowding fixes"
+GLOB_DIR=$(mktemp -d)
+node -e "
+const { leanSearch, globToRegExp } = require('$SERVER');
+const fs = require('fs');
+const D = '$GLOB_DIR';
+let pass = 0, fail = 0;
+function check(name, cond) { if (cond) { console.log('  PASS  ' + name); pass++; } else { console.log('  FAIL  ' + name); fail++; } }
+
+const t0 = Date.now();
+globToRegExp('src/{a,b');
+check('unbalanced-brace glob compiles instantly instead of hanging', (Date.now() - t0) < 1000);
+
+fs.mkdirSync(D + '/noisy', { recursive: true });
+let noisy = ''; for (let i = 0; i < 200; i++) noisy += 'register(thing' + i + ');\n';
+fs.writeFileSync(D + '/noisy/generated.js', noisy);
+fs.writeFileSync(D + '/real.js', 'function register(x) {\n  return x;\n}\n');
+const r = leanSearch({ pattern: '**/*.js', query: 'register', cwd: D, maxResults: 30 });
+check('a real match survives a 200-hit generated file in the same search', r.matches.some(m => m.file.includes('real.js')));
+
+process.exitCode = fail === 0 ? 0 : 1;
+"
+if [ $? -eq 0 ]; then pass "brace-hang fix and round-robin ranking both hold"; else fail "lean_search regression reappeared"; fi
+rm -rf "$GLOB_DIR"
 
 # ---------------------------------------------------------------------------
 git -C . worktree remove --force "$T" 2>/dev/null || rm -rf "$T"

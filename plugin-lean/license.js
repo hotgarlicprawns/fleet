@@ -27,9 +27,15 @@ const http = require('http');
 const CFG_DIR = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'fleet');
 const LICENSE_FILE = path.join(CFG_DIR, 'lean-license.json');
 const PRODUCT_FILE = path.join(__dirname, 'product.json');
+const REQUEST_TIMEOUT_MS = 12_000; // same as LicenseManager.swift's timeout
 
 function loadProduct() {
-  try { return JSON.parse(fs.readFileSync(PRODUCT_FILE, 'utf8')); } catch { return {}; }
+  const p = (() => { try { return JSON.parse(fs.readFileSync(PRODUCT_FILE, 'utf8')); } catch { return {}; } })();
+  // Same override pattern as bin/fleet.js's FLEET_LICENSE_API — needed to
+  // point this at Dodo's test-mode host instead of hardcoding live, e.g.
+  // while testing against a real Dodo test-mode product before going live.
+  if (process.env.FLEET_LICENSE_API) p.apiBase = process.env.FLEET_LICENSE_API;
+  return p;
 }
 
 function loadLicense() {
@@ -48,11 +54,13 @@ function postJSON(url, body) {
     const mod = u.protocol === 'http:' ? http : https;
     const req = mod.request(u, {
       method: 'POST',
+      timeout: REQUEST_TIMEOUT_MS,
       headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) }
     }, res => {
       let buf = ''; res.on('data', d => buf += d);
       res.on('end', () => { let p = {}; try { p = JSON.parse(buf); } catch {} resolve({ status: res.statusCode, body: p }); });
     });
+    req.on('timeout', () => req.destroy(new Error(`request timed out after ${REQUEST_TIMEOUT_MS}ms`)));
     req.on('error', reject); req.write(data); req.end();
   });
 }
@@ -88,13 +96,30 @@ async function validate() {
   const lic = loadLicense();
   if (!lic || !lic.key) return { ok: false, reason: 'no license on this machine' };
   const product = loadProduct();
+  if (!product.apiBase) return { ok: false, reason: 'fleet-lean Cloud is not live yet — no product configured' };
   try {
     const r = await postJSON(`${product.apiBase}/licenses/validate`,
       { license_key: lic.key, license_key_instance_id: lic.instanceId || undefined });
-    const ok = r.status >= 200 && r.status < 300 && r.body.valid !== false;
-    if (ok) saveLicense({ ...lic, validatedAt: new Date().toISOString(), valid: true });
-    else saveLicense({ ...lic, valid: false });
-    return { ok, body: r.body };
+    // Only an EXPLICIT rejection revokes the cached license: Dodo saying
+    // valid:false, or 403/404 (key deactivated / not found). Any other
+    // non-2xx (500, 429, a proxy hiccup) is treated the same as "couldn't
+    // reach the server" below — a Dodo outage should never itself lock a
+    // paying subscriber out. The prior version revoked on ANY non-2xx.
+    if (r.body && r.body.valid === false) {
+      saveLicense({ ...lic, valid: false });
+      return { ok: false, body: r.body };
+    }
+    if (r.status === 403 || r.status === 404) {
+      saveLicense({ ...lic, valid: false });
+      return { ok: false, body: r.body };
+    }
+    if (r.status >= 200 && r.status < 300) {
+      saveLicense({ ...lic, validatedAt: new Date().toISOString(), valid: true });
+      return { ok: true, body: r.body };
+    }
+    // Ambiguous server error — fall back to offline grace rather than revoke.
+    const grace = cachedMembership();
+    return { ok: grace, offline: true, reason: `server returned ${r.status}; ${grace ? '7-day offline grace active' : 'grace expired'}` };
   } catch (e) {
     const grace = cachedMembership();
     return { ok: grace, offline: true, reason: grace ? '7-day offline grace active' : 'offline and grace expired' };
@@ -105,8 +130,11 @@ async function deactivate() {
   const lic = loadLicense();
   if (!lic || !lic.key) return { ok: false, message: 'no fleet-lean Cloud license on this machine' };
   const product = loadProduct();
+  if (!product.apiBase) return { ok: false, message: 'fleet-lean Cloud is not live yet — no product configured' };
   try {
-    const r = await postJSON(`${product.apiBase}/licenses/deactivate`, { license_key: lic.key, license_key_instance_id: lic.instanceId });
+    const body = { license_key: lic.key };
+    if (lic.instanceId) body.license_key_instance_id = lic.instanceId; // omit rather than send null
+    const r = await postJSON(`${product.apiBase}/licenses/deactivate`, body);
     if (r.status >= 200 && r.status < 300) {
       try { fs.unlinkSync(LICENSE_FILE); } catch {}
       return { ok: true, message: 'deactivated — a seat is freed' };

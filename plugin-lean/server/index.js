@@ -91,8 +91,8 @@ function updateRollup(rec) {
 // of full file contents.
 // ---------------------------------------------------------------------------
 
-/** Minimal glob -> RegExp. Supports ** , * , ? , {a,b} — enough for real use
- *  without pulling in a glob dependency. */
+/** Minimal glob -> RegExp. Supports ** , * , ? , {a,b} , [...] — enough for
+ *  real use without pulling in a glob dependency. */
 function globToRegExp(glob) {
   let re = '', i = 0;
   while (i < glob.length) {
@@ -103,9 +103,15 @@ function globToRegExp(glob) {
     } else if (c === '?') { re += '[^/]'; i++; }
     else if (c === '{') {
       const end = glob.indexOf('}', i);
+      if (end === -1) { re += '\\{'; i++; continue; } // unbalanced — treat literally, don't loop forever
       const opts = glob.slice(i + 1, end).split(',').map(s => s.replace(/[.+^${}()|[\]\\]/g, '\\$&'));
       re += `(?:${opts.join('|')})`; i = end + 1;
-    } else if ('.+^${}()|[]\\'.includes(c)) { re += '\\' + c; i++; }
+    } else if (c === '[') {
+      const end = glob.indexOf(']', i + 1);
+      if (end === -1) { re += '\\['; i++; continue; } // unbalanced — treat literally
+      re += glob.slice(i, end + 1); // pass character class through as-is (regex syntax matches glob's here)
+      i = end + 1;
+    } else if ('.+^${}()|\\'.includes(c)) { re += '\\' + c; i++; }
     else { re += c; i++; }
   }
   return new RegExp('^' + re + '$');
@@ -113,56 +119,127 @@ function globToRegExp(glob) {
 
 const IGNORE_DIRS = new Set(['.git', 'node_modules', '.build', 'DerivedData', '.swiftpm', 'dist', 'build']);
 
-function walk(dir, out) {
+/** Best-effort .gitignore support: only reads the root .gitignore, only
+ *  matches whole path segments (not full gitignore glob semantics) — good
+ *  enough to skip the common junk directories a project already excludes,
+ *  not a complete implementation. */
+function readRootIgnoreNames(root) {
+  const names = new Set();
+  try {
+    const lines = fs.readFileSync(path.join(root, '.gitignore'), 'utf8').split('\n');
+    for (let l of lines) {
+      l = l.trim();
+      if (!l || l.startsWith('#')) continue;
+      l = l.replace(/^\/+/, '').replace(/\/+$/, '');
+      if (l && !l.includes('*') && !l.includes('/')) names.add(l);
+    }
+  } catch { /* no .gitignore, or unreadable — fine */ }
+  return names;
+}
+
+/** First-4KB NUL-byte sniff — the same heuristic git and most tools use to
+ *  guess "binary". Not perfect, but cheap and catches the common case
+ *  (compiled binaries, images) that has no business being searched or
+ *  edited as text. */
+function looksBinary(buf) {
+  const n = Math.min(buf.length, 4096);
+  for (let i = 0; i < n; i++) if (buf[i] === 0) return true;
+  return false;
+}
+
+function walk(dir, out, ignoreNames) {
   let entries;
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
   for (const e of entries) {
-    if (IGNORE_DIRS.has(e.name)) continue;
+    if (IGNORE_DIRS.has(e.name) || (ignoreNames && ignoreNames.has(e.name))) continue;
     const full = path.join(dir, e.name);
-    if (e.isDirectory()) walk(full, out);
+    if (e.isDirectory()) walk(full, out, ignoreNames);
     else if (e.isFile()) out.push(full);
   }
 }
 
-function leanSearch({ pattern, query, isRegex = false, contextLines = 3, maxResults = 30, cwd }) {
+const MAX_OUTPUT_BYTES = 60_000;   // keep the fused call itself from becoming the token cost
+const MAX_LINE_CHARS = 300;        // one absurdly long line (minified JS) shouldn't dominate a snippet
+
+function truncateLine(l) {
+  return l.length > MAX_LINE_CHARS ? l.slice(0, MAX_LINE_CHARS) + ' …[truncated]' : l;
+}
+
+function leanSearch({ pattern, query, isRegex = false, caseInsensitive = false, contextLines = 3, maxResults = 30, cwd }) {
   const root = path.resolve(cwd || process.cwd());
+  const ignoreNames = readRootIgnoreNames(root);
   const all = [];
-  walk(root, all);
+  walk(root, all, ignoreNames);
   const rel = f => path.relative(root, f);
   const matcher = globToRegExp(pattern);
   const files = all.filter(f => matcher.test(rel(f)));
 
-  const needle = isRegex ? new RegExp(query) : null;
+  const flags = caseInsensitive ? 'i' : '';
+  const needle = isRegex ? new RegExp(query, flags) : null;
+  const needleLower = caseInsensitive && !isRegex ? query.toLowerCase() : query;
+
   const results = [];
+  let filesSkippedBinary = 0;
   for (const file of files) {
-    let text;
-    try { text = fs.readFileSync(file, 'utf8'); } catch { continue; }
+    let buf;
+    try { buf = fs.readFileSync(file); } catch { continue; }
+    if (looksBinary(buf)) { filesSkippedBinary++; continue; }
+    const text = buf.toString('utf8');
     const lines = text.split('\n');
     const hits = [];
     lines.forEach((line, idx) => {
-      const isMatch = isRegex ? needle.test(line) : line.includes(query);
+      const isMatch = isRegex ? needle.test(line)
+        : caseInsensitive ? line.toLowerCase().includes(needleLower) : line.includes(query);
       if (isMatch) hits.push(idx);
     });
     if (hits.length) results.push({ file: rel(file), hits, lines });
   }
-  // rank: files with more matches first
-  results.sort((a, b) => b.hits.length - a.hits.length);
 
-  const out = [];
-  for (const r of results) {
+  // Merge each file's hit lines into non-overlapping context windows first,
+  // so a cluster of nearby hits produces one snippet instead of N
+  // overlapping ones (a real prior bug: a 20-line file could return >10x
+  // its own size in repeated context). Then round-robin one window per
+  // matched file at a time, instead of sorting by raw hit count and
+  // cutting off — a single generated file with hundreds of hits should not
+  // be able to push every other matched file out of the results.
+  const perFile = results.map(r => {
+    const windows = [];
     for (const lineIdx of r.hits) {
-      if (out.length >= maxResults) break;
       const start = Math.max(0, lineIdx - contextLines);
       const end = Math.min(r.lines.length, lineIdx + contextLines + 1);
-      out.push({
-        file: r.file,
-        lineNumber: lineIdx + 1,
-        snippet: r.lines.slice(start, end).join('\n')
-      });
+      const last = windows[windows.length - 1];
+      if (last && start <= last.end) { last.end = Math.max(last.end, end); last.hitLines.push(lineIdx + 1); }
+      else windows.push({ start, end, hitLines: [lineIdx + 1] });
     }
-    if (out.length >= maxResults) break;
+    return { file: r.file, lines: r.lines, windows, hitCount: r.hits.length };
+  });
+
+  const out = [];
+  let outBytes = 0, truncated = false;
+  let round = 0, remaining = perFile.filter(f => f.windows.length > 0);
+  outer:
+  while (remaining.length) {
+    for (const f of remaining) {
+      if (round >= f.windows.length) continue;
+      if (out.length >= maxResults) break outer;
+      const w = f.windows[round];
+      const snippet = f.lines.slice(w.start, w.end).map(truncateLine).join('\n');
+      const entry = { file: f.file, lineNumber: w.hitLines[0], matchedLines: w.hitLines, snippet };
+      const entryBytes = JSON.stringify(entry).length;
+      if (outBytes + entryBytes > MAX_OUTPUT_BYTES) { truncated = true; break outer; }
+      out.push(entry); outBytes += entryBytes;
+    }
+    round++;
+    remaining = remaining.filter(f => round < f.windows.length);
   }
-  return { matches: out, filesScanned: files.length, filesMatched: results.length };
+
+  return {
+    matches: out,
+    filesScanned: files.length,
+    filesMatched: results.length,
+    filesSkippedBinary,
+    truncated // true if results were cut short by the output size cap, not just maxResults
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -179,16 +256,21 @@ function normalizeForMatch(s) {
     .replace(/—/g, '-')          // em dash
     .replace(/…/g, '...')        // ellipsis
     .replace(/ /g, ' ')          // nbsp
-    .replace(/\t/g, '  ')             // tabs -> 2sp, comparison only
+    .replace(/\t/g, '  ')             // tabs -> 2sp, COMPARISON ONLY — never used
+                                       // when actually writing a line back out
     .split('\n').map(l => l.replace(/\s+$/, '')).join('\n'); // trailing ws
 }
 
 function indentOf(line) { const m = line.match(/^[ ]*/); return m[0].length; }
+/** Raw leading-whitespace prefix, spaces AND tabs, exactly as written —
+ *  used when actually reconstructing a line so tab-indented files don't
+ *  get silently corrupted by the space-only count above (which is fine for
+ *  the pre-normalized comparison in tryMatch, but was wrongly reused for
+ *  real reindentation in a prior version — a tab-indented Python file with
+ *  a line starting a tab counted as indent 0, then had spaces spliced onto
+ *  column 0, breaking the file). */
+function indentPrefix(line) { const m = line.match(/^[ \t]*/); return m[0]; }
 
-/** Compares `find` (as lines) against a same-length window of `fileLines`
- *  starting at `start`. Requires exact indent-delta-from-first-line match
- *  (base indent may differ; relative nesting may not) plus a normalized
- *  text match, exact first, then within a small Levenshtein budget. */
 function levenshtein(a, b) {
   const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
   for (let j = 0; j <= b.length; j++) dp[0][j] = j;
@@ -202,7 +284,21 @@ function levenshtein(a, b) {
   return dp[a.length][b.length];
 }
 
-function tryMatch(findLines, fileLines, start) {
+// A short find string tolerating a 2-character Levenshtein budget is how
+// "retry(1);" silently matched and overwrote "retry(2);" in testing — one
+// digit is within budget for a string that short. Fuzzy matching is now
+// OPT-IN (edit.fuzzy === true) and additionally refuses to run at all
+// below this length, no matter what the caller asks for.
+const MIN_FUZZY_LEN = 24;
+
+/** Compares `find` (as lines) against a same-length window of `fileLines`
+ *  starting at `start`. Requires exact indent-delta-from-first-line match
+ *  (base indent may differ; relative nesting may not) plus a normalized
+ *  text match — exact only, unless `fuzzy` is explicitly true AND the
+ *  find text clears MIN_FUZZY_LEN, in which case a small Levenshtein
+ *  budget is allowed as a fallback. Always reports the actual matched
+ *  text and distance so a fuzzy match is never silently invisible. */
+function tryMatch(findLines, fileLines, start, fuzzy) {
   const n = findLines.length;
   if (start + n > fileLines.length) return null;
   const window = fileLines.slice(start, start + n);
@@ -220,85 +316,123 @@ function tryMatch(findLines, fileLines, start) {
 
   const findFlat = findNorm.map(l => l.trim()).join('\n');
   const winFlat = winNorm.map(l => l.trim()).join('\n');
-  if (findFlat === winFlat) return { start, end: start + n, distance: 0 };
+  if (findFlat === winFlat) return { start, end: start + n, distance: 0, matchedText: window.join('\n') };
 
+  if (!fuzzy || findFlat.length < MIN_FUZZY_LEN) return null;
+
+  // Edit distance can never be smaller than the length difference — skip
+  // the O(n*m) DP entirely for windows that are already too different in
+  // length to fit the budget. This is what keeps a large-file fuzzy search
+  // from being an accidental denial of service.
   const budget = Math.max(2, Math.floor(0.05 * findFlat.length));
+  if (Math.abs(findFlat.length - winFlat.length) > budget) return null;
+
   const dist = levenshtein(findFlat, winFlat);
-  if (dist <= budget) return { start, end: start + n, distance: dist };
+  if (dist <= budget) return { start, end: start + n, distance: dist, matchedText: window.join('\n') };
   return null;
 }
 
 /** Finds every acceptable match of `find` in `text`. Never returns "the
- *  best" match silently — callers must check length and reject on >1. */
-function findAllMatches(find, text) {
+ *  best" match silently — callers must check length and reject on >1.
+ *  Exact (distance 0) matches always take priority over fuzzy ones. */
+function findAllMatches(find, text, fuzzy = false) {
   const findLines = find.split('\n');
   const fileLines = text.split('\n');
   const out = [];
   for (let start = 0; start <= fileLines.length - findLines.length; start++) {
-    const m = tryMatch(findLines, fileLines, start);
-    if (m) out.push(m);
+    const exact = tryMatch(findLines, fileLines, start, false);
+    if (exact) { out.push(exact); continue; }
+    if (fuzzy) {
+      const fz = tryMatch(findLines, fileLines, start, true);
+      if (fz) out.push(fz);
+    }
   }
-  // exact matches (distance 0) take priority over fuzzy ones if both exist
-  const exact = out.filter(m => m.distance === 0);
-  return exact.length ? exact : out;
+  const exactOnly = out.filter(m => m.distance === 0);
+  return exactOnly.length ? exactOnly : out;
 }
 
 function applyReplace(text, find, replace, match) {
   const fileLines = text.split('\n');
   const findLines = find.split('\n');
   const replaceLines = replace.split('\n');
-  // preserve the matched block's actual base indentation, since `replace`
-  // is written relative to `find`'s own indentation in the caller's head
-  const actualBase = indentOf(fileLines[match.start]);
-  const findBase = indentOf(findLines[0]);
-  const shift = actualBase - findBase;
-  // Every line's own indentation is adjusted by the same delta, including
-  // the first — an earlier version exempted line 0, which silently dropped
-  // its indentation whenever `replace` was written flush-left (the common
-  // case for a single-line edit). Also handles negative shift (dedenting),
-  // which the previous clamp-to-zero-shift version couldn't.
+  // Preserve the matched block's ACTUAL indentation prefix (spaces or tabs,
+  // literally, not a recomputed space count) and graft each replace line's
+  // own relative indent (whatever's beyond find's own base prefix) onto it.
+  // This works for space- or tab-indented files alike, and for negative
+  // shifts (dedenting), without ever assuming a particular indent unit.
+  const actualBasePrefix = indentPrefix(fileLines[match.start]);
+  const findBasePrefix = indentPrefix(findLines[0]);
   const shifted = replaceLines.map(l => {
-    if (shift === 0 || l.length === 0) return l;
-    const curIndent = indentOf(l);
-    const newIndent = Math.max(0, curIndent + shift);
-    return ' '.repeat(newIndent) + l.slice(curIndent);
+    if (l.length === 0) return l;
+    const linePrefix = indentPrefix(l);
+    const rel = linePrefix.startsWith(findBasePrefix) ? linePrefix.slice(findBasePrefix.length) : '';
+    return actualBasePrefix + rel + l.slice(linePrefix.length);
   });
   fileLines.splice(match.start, match.end - match.start, ...shifted);
   return fileLines.join('\n');
+}
+
+/** Resolve a file argument to a stable dedup key. realpathSync requires the
+ *  file to exist, which it must (we're about to read it) — falls back to
+ *  path.resolve only if realpath itself throws for some other reason. This
+ *  is what makes `f.js` and `./f.js` in the same batch resolve to one file
+ *  instead of racing two independent writes against it. */
+function realKey(file) {
+  try { return fs.realpathSync(file); } catch { return path.resolve(file); }
 }
 
 function leanEdit({ edits }) {
   if (!Array.isArray(edits) || edits.length === 0) {
     return { ok: false, error: 'edits must be a non-empty array' };
   }
-  // group by file so multiple edits to the same file resolve against
-  // each other's original positions before any are applied
-  const byFile = new Map();
   for (const e of edits) {
-    if (!byFile.has(e.file)) byFile.set(e.file, []);
-    byFile.get(e.file).push(e);
+    if (!e.find || e.find.length === 0) {
+      return { ok: false, applied: 0, failures: [{ file: e.file, error: 'find must be a non-empty string (an empty find would match everywhere)' }] };
+    }
   }
 
-  const plan = []; // { file, text, matchesToApply: [{edit, match}] }
+  // group by REAL path so multiple edits to the same file — however it was
+  // spelled in the batch — resolve against each other's original positions
+  // before any are applied, instead of racing two independent writes
+  const byFile = new Map(); // realpath -> { displayFile, edits: [] }
+  for (const e of edits) {
+    const key = realKey(e.file);
+    if (!byFile.has(key)) byFile.set(key, { displayFile: e.file, edits: [] });
+    byFile.get(key).edits.push(e);
+  }
+
+  const plan = []; // { file, originalRaw, hadCRLF, text, resolved }
   const failures = [];
 
-  for (const [file, fileEdits] of byFile) {
-    let text;
-    try { text = fs.readFileSync(file, 'utf8'); } catch (e) {
-      failures.push({ file, error: `cannot read file: ${e.message}` });
+  for (const [realFile, { displayFile, edits: fileEdits }] of byFile) {
+    let originalRaw;
+    try { originalRaw = fs.readFileSync(realFile); } catch (e) {
+      failures.push({ file: displayFile, error: `cannot read file: ${e.message}` });
       continue;
     }
+    if (looksBinary(originalRaw)) {
+      failures.push({ file: displayFile, error: 'file looks binary (contains a NUL byte) — refusing to edit it as text' });
+      continue;
+    }
+    const decoded = originalRaw.toString('utf8');
+    if (!Buffer.from(decoded, 'utf8').equals(originalRaw)) {
+      failures.push({ file: displayFile, error: 'file is not valid UTF-8 — refusing to edit it (would corrupt bytes on write-back)' });
+      continue;
+    }
+    const hadCRLF = decoded.includes('\r\n');
+    const text = hadCRLF ? decoded.replace(/\r\n/g, '\n') : decoded; // work in LF, restore CRLF on write
+
     const resolved = [];
     let ok = true;
     for (const e of fileEdits) {
-      const matches = findAllMatches(e.find, text);
+      const matches = findAllMatches(e.find, text, e.fuzzy === true);
       if (matches.length === 0) {
-        failures.push({ file, find: e.find.slice(0, 80), error: 'no match found (not even fuzzy)' });
+        failures.push({ file: displayFile, find: e.find.slice(0, 80), error: 'no match found' + (e.fuzzy ? ' (not even fuzzy)' : ' — pass fuzzy:true to allow approximate matches') });
         ok = false; continue;
       }
       if (matches.length > 1 && e.occurrence == null) {
         failures.push({
-          file, find: e.find.slice(0, 80),
+          file: displayFile, find: e.find.slice(0, 80),
           error: `ambiguous: ${matches.length} matches found — pass "occurrence" to disambiguate`,
           matchedLines: matches.map(m => m.start + 1)
         });
@@ -308,7 +442,7 @@ function leanEdit({ edits }) {
       if (e.occurrence != null) {
         chosen = matches[e.occurrence - 1];
         if (!chosen) {
-          failures.push({ file, find: e.find.slice(0, 80), error: `occurrence ${e.occurrence} out of range (${matches.length} matches)` });
+          failures.push({ file: displayFile, find: e.find.slice(0, 80), error: `occurrence ${e.occurrence} out of range (${matches.length} matches)` });
           ok = false; continue;
         }
       } else {
@@ -317,26 +451,80 @@ function leanEdit({ edits }) {
       resolved.push({ edit: e, match: chosen });
     }
     if (!ok) continue;
-    plan.push({ file, text, resolved });
+
+    // Reject overlapping matches within the same file — applying both would
+    // corrupt the file (one edit's line range eating into another's), and
+    // there is no "correct" way to guess which one the caller meant to win.
+    resolved.sort((a, b) => a.match.start - b.match.start);
+    for (let i = 1; i < resolved.length; i++) {
+      if (resolved[i].match.start < resolved[i - 1].match.end) {
+        failures.push({
+          file: displayFile,
+          error: `overlapping edits: match at line ${resolved[i - 1].match.start + 1} and match at line ${resolved[i].match.start + 1} touch the same lines — split into separate calls or adjust the find text`
+        });
+        ok = false; break;
+      }
+    }
+    if (!ok) continue;
+
+    plan.push({ file: realFile, displayFile, originalRaw, hadCRLF, text, resolved });
   }
 
-  // atomic: if anything anywhere failed, apply nothing
+  // Collect fuzzy matches for the response BEFORE anything is written, so
+  // a fuzzy match is always visible in the result — never a silent swap.
+  const fuzzyUsed = [];
+  for (const { displayFile, resolved } of plan) {
+    for (const { match } of resolved) {
+      if (match.distance > 0) fuzzyUsed.push({ file: displayFile, line: match.start + 1, distance: match.distance, matchedText: match.matchedText });
+    }
+  }
+
+  // atomic: if anything anywhere failed to RESOLVE, apply nothing
   if (failures.length > 0) return { ok: false, applied: 0, failures };
 
-  let applied = 0;
-  const written = [];
-  for (const { file, text, resolved } of plan) {
-    // apply in reverse line order so earlier matches' line numbers don't shift
-    resolved.sort((a, b) => b.match.start - a.match.start);
-    let out = text;
-    for (const { edit, match } of resolved) {
-      out = applyReplace(out, edit.find, edit.replace, match);
-      applied++;
+  // Check writability of every target before touching anything.
+  for (const { file, displayFile } of plan) {
+    try { fs.accessSync(file, fs.constants.W_OK); } catch (e) {
+      return { ok: false, applied: 0, failures: [{ file: displayFile, error: `file is not writable: ${e.message}` }] };
     }
-    fs.writeFileSync(file, out);
-    written.push(file);
   }
-  return { ok: true, applied, filesWritten: written };
+
+  // Build every file's final content in memory first — no disk writes yet.
+  const writePlan = plan.map(({ file, displayFile, originalRaw, hadCRLF, text, resolved }) => {
+    // apply in reverse line order so earlier matches' line numbers don't shift
+    const inReverse = [...resolved].sort((a, b) => b.match.start - a.match.start);
+    let out = text;
+    for (const { edit, match } of inReverse) out = applyReplace(out, edit.find, edit.replace, match);
+    if (hadCRLF) out = out.replace(/\n/g, '\r\n');
+    return { file, displayFile, originalRaw, out, tmpPath: `${file}.leanedit-${process.pid}.tmp`, editCount: resolved.length };
+  });
+
+  // Genuinely atomic multi-file write: write every file's new content to a
+  // temp path first; only once ALL temp writes succeed do we rename any of
+  // them into place. If a rename fails partway through, already-renamed
+  // files are rolled back to their original bytes — a real attempt at
+  // "nothing changed" rather than a partially-applied batch.
+  const writtenTmp = [];
+  try {
+    for (const wp of writePlan) { fs.writeFileSync(wp.tmpPath, wp.out); writtenTmp.push(wp); }
+  } catch (e) {
+    for (const wp of writtenTmp) { try { fs.unlinkSync(wp.tmpPath); } catch {} }
+    return { ok: false, applied: 0, failures: [{ error: `failed while staging writes, nothing changed: ${e.message}` }] };
+  }
+
+  const renamed = [];
+  try {
+    for (const wp of writePlan) { fs.renameSync(wp.tmpPath, wp.file); renamed.push(wp); }
+  } catch (e) {
+    for (const wp of renamed) { try { fs.writeFileSync(wp.file, wp.originalRaw); } catch {} }
+    for (const wp of writePlan) { try { fs.unlinkSync(wp.tmpPath); } catch {} }
+    return { ok: false, applied: 0, failures: [{ error: `failed while finalizing writes — rolled back already-applied files: ${e.message}` }] };
+  }
+
+  const applied = writePlan.reduce((n, wp) => n + wp.editCount, 0);
+  const result = { ok: true, applied, filesWritten: writePlan.map(wp => wp.displayFile) };
+  if (fuzzyUsed.length) result.fuzzyMatches = fuzzyUsed; // always visible, never a silent swap
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -346,13 +534,14 @@ function leanEdit({ edits }) {
 const TOOLS = [
   {
     name: 'lean_search',
-    description: 'Search files by glob pattern and content match in one call, returning ranked snippets (matched line ± context) instead of full file contents. Use this instead of separate Glob+Grep+Read calls.',
+    description: 'Search files by glob pattern and content match in one call, returning ranked snippets (matched line ± context) instead of full file contents. Skips binary files. Output is capped in size (~60KB) and merges overlapping context windows, and spreads results round-robin across matched files so one noisy file can\'t crowd out the rest. Use this instead of separate Glob+Grep+Read calls.',
     inputSchema: {
       type: 'object',
       properties: {
         pattern: { type: 'string', description: 'Glob for files to search, e.g. **/*.swift' },
         query: { type: 'string', description: 'Text or regex to match within files' },
         isRegex: { type: 'boolean', default: false },
+        caseInsensitive: { type: 'boolean', default: false },
         contextLines: { type: 'integer', default: 3 },
         maxResults: { type: 'integer', default: 30 },
         cwd: { type: 'string', description: 'Root directory to search from (default: server cwd)' }
@@ -362,7 +551,7 @@ const TOOLS = [
   },
   {
     name: 'lean_edit',
-    description: 'Apply one or more find-and-replace edits across one or more files in a single call. Matching tolerates whitespace/indentation and unicode punctuation look-alikes, but rejects (with no changes made) if a find text matches more than one place and no "occurrence" was given — it never guesses. Use this instead of separate Read+Edit calls, especially across multiple files.',
+    description: 'Apply one or more find-and-replace edits across one or more files in a single call. Matches EXACT text only by default (after whitespace/unicode-punctuation normalization) — it never guesses. Rejects with no changes made if a find text matches more than one place (pass "occurrence" to disambiguate) or if two edits in the same batch would touch overlapping lines. The whole batch is atomic: if anything fails to resolve or write, no file is changed. Set fuzzy:true on an edit to allow a small Levenshtein-distance match when no exact match exists (only for find text of 24+ characters, to avoid short strings matching the wrong nearby line) — any fuzzy match actually used is always reported back in the result, never applied silently. Use this instead of separate Read+Edit calls, especially across multiple files.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -374,7 +563,8 @@ const TOOLS = [
               file: { type: 'string' },
               find: { type: 'string' },
               replace: { type: 'string' },
-              occurrence: { type: 'integer', description: '1-based index to disambiguate multiple matches' }
+              occurrence: { type: 'integer', description: '1-based index to disambiguate multiple matches' },
+              fuzzy: { type: 'boolean', default: false, description: 'Allow an approximate match if no exact match is found (find must be 24+ chars)' }
             },
             required: ['file', 'find', 'replace']
           }

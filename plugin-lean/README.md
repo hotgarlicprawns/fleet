@@ -27,12 +27,23 @@ savings. fleet-lean's savings numbers are computed and stored entirely under
 - **`lean_search`** — glob + grep + read, fused into one call, returning
   ranked snippets (matched line ± context) instead of full file contents.
 - **`lean_edit`** — batch find/replace across one or more files in one call.
-  Matching tolerates reindentation and unicode look-alike punctuation (curly
-  vs straight quotes, em/en dash vs hyphen, ellipsis), but if a `find` text
-  matches more than one place in a file and you don't say which one
-  (`occurrence`), **the edit is rejected and nothing is changed** — it never
-  guesses which occurrence you meant. A batch is all-or-nothing: if any edit
-  in the call can't be resolved, none of them are applied.
+  Matches **exact text only by default** (after whitespace/reindentation and
+  unicode look-alike punctuation normalization — curly vs straight quotes,
+  em/en dash vs hyphen, ellipsis). If a `find` text matches more than one
+  place in a file and you don't say which one (`occurrence`), **the edit is
+  rejected and nothing is changed** — it never guesses. Two edits in the same
+  batch that touch overlapping lines are also rejected outright, rather than
+  applying and corrupting the region. The whole batch is atomic across every
+  file, not just per-match: every file's new content is staged before
+  anything is written, and if any file can't be written, nothing is — an
+  earlier version could leave a batch half-applied if a later file failed.
+  Refuses to touch binary or non-UTF-8 files, and preserves tabs vs. spaces
+  and CRLF vs. LF exactly, rather than risking corruption. Approximate
+  (fuzzy) matching is **opt-in** per edit (`fuzzy: true`), only runs for find
+  text of 24+ characters (a short string tolerating a couple of characters
+  of drift is how an earlier version once matched — and silently overwrote —
+  the wrong line), and any fuzzy match actually used is always reported back
+  in the result, never applied invisibly.
 
 ## Savings report
 
@@ -88,6 +99,14 @@ complexity.
 plugin-lean/test/hard-test.sh
 ```
 
-Real-repo before/after numbers, and a mutation-tested guarantee that the
+Real-repo before/after numbers, a mutation-tested guarantee that the
 ambiguity guard actually prevents editing the wrong occurrence (the test is
-run once with the guard disabled to confirm it *would* fail without the fix).
+run once with the guard disabled to confirm it *would* fail without the fix),
+and a dedicated regression section (section 10-11) for a set of real
+silent-corruption bugs an Opus-model review found and reproduced against
+this code on 2026-09-23 — wrong-line fuzzy matches, reverting another
+agent's concurrent changes, overlapping-edit corruption, tab/CRLF/non-UTF-8
+handling, a glob-parsing hang, and a noisy generated file crowding a real
+match out of search results. All were fixed and are now guarded by tests
+that reproduce the exact original failure, not just check the fix in the
+abstract.
