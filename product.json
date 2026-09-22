@@ -1,7 +1,7 @@
 {
   "name": "Fleet Pro",
-  "productId": "",
-  "checkoutUrl": "",
+  "productId": "pdt_0No8294k2zu1ueeXAt9hJ",
+  "checkoutUrl": "https://checkout.dodopayments.com/buy/pdt_0No8294k2zu1ueeXAt9hJ?quantity=1",
   "apiBase": "https://live.dodopayments.com",
   "trialDays": 14,
   "freePaneLimit": 3
