@@ -337,6 +337,21 @@ else fail "activate: unexpected result for a bogus key: $(grep 'control: activat
 kill_app_tree
 
 # ---------------------------------------------------------------------------
+section "7f. CLI: FLEET_LICENSE_API overrides a saved config.json (regression)"
+# Real bug hit live: a persisted license.apiBase in config.json silently
+# defeated FLEET_LICENSE_API, because it only overrode the built-in default,
+# not a value already merged in from a saved file. Fixed by applying the env
+# override after the file merge, in loadConfig() itself.
+CFGTEST=/tmp/fleet-cfgtest-$$
+mkdir -p "$CFGTEST/fleet"
+echo '{"license":{"apiBase":"https://WRONG-HOST.example"}}' > "$CFGTEST/fleet/config.json"
+RESOLVED=$(XDG_CONFIG_HOME="$CFGTEST" FLEET_LICENSE_API=https://test.dodopayments.com node ../bin/fleet.js debug-config 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["license"]["apiBase"])')
+[ "$RESOLVED" = "https://test.dodopayments.com" ] \
+  && pass "FLEET_LICENSE_API overrides a saved config.json's apiBase (resolved: $RESOLVED)" \
+  || fail "env override lost to saved config: resolved to '$RESOLVED', expected the env value"
+rm -rf "$CFGTEST"
+
+# ---------------------------------------------------------------------------
 section "8. UI automation (tab switch, resize) — needs Accessibility permission"
 launch 3
 if osascript -e 'tell application "System Events" to tell process "Fleet" to get title of window 1' >/dev/null 2>&1; then

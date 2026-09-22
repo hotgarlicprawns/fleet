@@ -78,8 +78,14 @@ function deepMerge(base, over) {
   return out;
 }
 function loadConfig() {
-  try { return deepMerge(DEFAULT_CONFIG, JSON.parse(fs.readFileSync(CFG_FILE, 'utf8'))); }
-  catch { return JSON.parse(JSON.stringify(DEFAULT_CONFIG)); }
+  let cfg;
+  try { cfg = deepMerge(DEFAULT_CONFIG, JSON.parse(fs.readFileSync(CFG_FILE, 'utf8'))); }
+  catch { cfg = JSON.parse(JSON.stringify(DEFAULT_CONFIG)); }
+  // FLEET_LICENSE_API must win over EVERYTHING, including a saved config.json
+  // (a persisted license.apiBase silently defeated it before this fix — see
+  // the commit this line was added in for the full story).
+  if (process.env.FLEET_LICENSE_API) cfg.license.apiBase = process.env.FLEET_LICENSE_API;
+  return cfg;
 }
 function saveConfig(cfg) {
   fs.mkdirSync(CFG_DIR, { recursive: true });
@@ -943,6 +949,9 @@ async function main() {
       else if (sub === 'deactivate') await licenseDeactivate(cfg);
       else fail('usage: fleet license activate <key> | status | deactivate');
       break;
+
+    case 'debug-config':  // internal — prints resolved config as JSON, for tests
+      console.log(JSON.stringify(cfg)); break;
 
     default:
       fail(`unknown command: ${cmd}`); console.log(HELP); process.exit(1);
