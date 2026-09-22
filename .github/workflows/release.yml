@@ -7,6 +7,12 @@
 # today (unsigned, no npm) and gains real signing/publishing later just by
 # adding secrets — no workflow edit needed.
 #
+# Note: `if:` conditions cannot reference the `secrets` context directly
+# (GitHub Actions rejects the whole workflow file if they do — it fails
+# every run instantly with zero jobs scheduled, which is exactly what
+# happened here before this fix). So presence checks are computed once into
+# job-level `env` vars below, and steps key off `env.*` instead.
+#
 # Secrets (all optional — the workflow degrades gracefully without them):
 #   MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD   Developer ID Application cert (.p12, base64), + its password
 #   FLEET_SIGN_ID           e.g. "Developer ID Application: Your Name (TEAMID)"
@@ -21,6 +27,10 @@ permissions:
 jobs:
   release:
     runs-on: macos-latest
+    env:
+      HAS_CERT: ${{ secrets.MACOS_CERT_P12_BASE64 != '' && 'true' || '' }}
+      HAS_NOTARY: ${{ (secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_PASSWORD != '') && 'true' || '' }}
+      HAS_NPM: ${{ secrets.NPM_TOKEN != '' && 'true' || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -28,7 +38,7 @@ jobs:
         run: test "v$(cat app/VERSION)" = "${GITHUB_REF_NAME}"
 
       - name: Import signing certificate
-        if: ${{ secrets.MACOS_CERT_P12_BASE64 != '' }}
+        if: ${{ env.HAS_CERT == 'true' }}
         env:
           CERT: ${{ secrets.MACOS_CERT_P12_BASE64 }}
           PASS: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -43,7 +53,7 @@ jobs:
           security list-keychains -d user -s "$KC" login.keychain-db
 
       - name: Store notary credentials
-        if: ${{ secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_PASSWORD != '' }}
+        if: ${{ env.HAS_NOTARY == 'true' }}
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -53,7 +63,7 @@ jobs:
       - name: Build (+ sign/notarize if configured) the dmg
         env:
           FLEET_SIGN_ID: ${{ secrets.FLEET_SIGN_ID }}
-          FLEET_NOTARY_PROFILE: ${{ (secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_PASSWORD != '') && 'fleet-notary' || '' }}
+          FLEET_NOTARY_PROFILE: ${{ env.HAS_NOTARY == 'true' && 'fleet-notary' || '' }}
         run: app/make-dmg.sh
 
       - name: GitHub release
@@ -70,10 +80,10 @@ jobs:
             --generate-notes --notes "$NOTE"
 
       - uses: actions/setup-node@v4
-        if: ${{ secrets.NPM_TOKEN != '' }}
+        if: ${{ env.HAS_NPM == 'true' }}
         with: { node-version: 22, registry-url: "https://registry.npmjs.org" }
       - name: Publish CLI
-        if: ${{ secrets.NPM_TOKEN != '' }}
+        if: ${{ env.HAS_NPM == 'true' }}
         run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
