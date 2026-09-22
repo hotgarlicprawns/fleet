@@ -59,7 +59,17 @@ function recordCall(rec) {
   calls.push(withTs);
   try {
     fs.mkdirSync(SESS_DIR, { recursive: true });
-    fs.writeFileSync(SIDECAR, JSON.stringify({ runId: RUN_ID, pid: process.pid, calls }, null, 2));
+    // claudePid: the parent `claude` process's own PID. Claude Code spawns
+    // this MCP server as a DIRECT child of the top-level `claude` process
+    // for that session (verified empirically against real running Claude
+    // Code sessions — MCP subprocesses share process.ppid with each other
+    // and it equals `claude`'s own PID). The HUD's statusline.sh hook is
+    // also invoked as a direct child of that same process, so it can write
+    // the identical value as its own $PPID — giving both sidecars a real,
+    // shared key instead of the previous "most recently modified file"
+    // guess, which picks the wrong session whenever more than one Claude
+    // pane is active (exactly Fleet's normal use case).
+    fs.writeFileSync(SIDECAR, JSON.stringify({ runId: RUN_ID, pid: process.pid, claudePid: process.ppid, calls }, null, 2));
   } catch (e) { log('sidecar write failed:', e.message); }
   updateRollup(withTs); // must be the timestamped copy — the original `rec` has no .ts
 }
@@ -74,16 +84,37 @@ function updateRollup(rec) {
   let data;
   try { data = JSON.parse(fs.readFileSync(ROLLUP_FILE, 'utf8')); } catch { data = { days: {} } }
   if (!data.days) data.days = {};
-  const bucket = data.days[day] || { calls: 0, callsAvoided: 0, estTokens: 0, runs: [] };
+  const bucket = data.days[day] || { calls: 0, callsAvoided: 0, estTokens: 0, estTokensAvoided: 0, runs: [] };
   bucket.calls += 1;
   bucket.callsAvoided += rec.callsAvoided || 0;
   bucket.estTokens += (rec.estInputTokens || 0) + (rec.estOutputTokens || 0);
+  bucket.estTokensAvoided = (bucket.estTokensAvoided || 0) + (rec.estTokensAvoided || 0);
   if (!bucket.runs.includes(RUN_ID)) bucket.runs.push(RUN_ID);
   data.days[day] = bucket;
   try {
     fs.mkdirSync(CFG_DIR, { recursive: true });
     fs.writeFileSync(ROLLUP_FILE, JSON.stringify(data, null, 2));
   } catch (e) { log('rollup write failed:', e.message); }
+}
+
+// Per-run *.lean.json sidecars are never cleaned up by the Fleet app's own
+// pruning (SessionStats.pruneOlderThan in the Swift app): it tries to
+// decode every "*.json" file as its own SessionStat schema, silently skips
+// anything that fails to decode (a *.lean.json has a different shape), and
+// so never deletes them — meaning someone using fleet-lean standalone
+// (no Fleet app at all) had NO cleanup path and these accumulate forever.
+// This is fleet-lean's own equivalent, run once per server startup (not
+// per call — a full directory scan per call would be wasteful).
+const SIDECAR_MAX_AGE_MS = 30 * 864e5; // 30 days, matches the app's own convention
+function pruneOldSidecars() {
+  let names;
+  try { names = fs.readdirSync(SESS_DIR); } catch { return; }
+  const cutoff = Date.now() - SIDECAR_MAX_AGE_MS;
+  for (const n of names) {
+    if (!n.endsWith('.lean.json')) continue; // never touch the HUD's own sidecars
+    const full = path.join(SESS_DIR, n);
+    try { if (fs.statSync(full).mtimeMs < cutoff) fs.unlinkSync(full); } catch { /* racing another process — fine, skip */ }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +211,10 @@ function leanSearch({ pattern, query, isRegex = false, caseInsensitive = false, 
 
   const results = [];
   let filesSkippedBinary = 0;
+  let vanillaReadBytes = 0; // REAL, not estimated: the actual byte size of every
+                            // file that matched — what a built-in Read would have
+                            // cost per file, since we already have these bytes
+                            // in hand from searching them
   for (const file of files) {
     let buf;
     try { buf = fs.readFileSync(file); } catch { continue; }
@@ -192,7 +227,7 @@ function leanSearch({ pattern, query, isRegex = false, caseInsensitive = false, 
         : caseInsensitive ? line.toLowerCase().includes(needleLower) : line.includes(query);
       if (isMatch) hits.push(idx);
     });
-    if (hits.length) results.push({ file: rel(file), hits, lines });
+    if (hits.length) { results.push({ file: rel(file), hits, lines }); vanillaReadBytes += buf.length; }
   }
 
   // Merge each file's hit lines into non-overlapping context windows first,
@@ -238,7 +273,8 @@ function leanSearch({ pattern, query, isRegex = false, caseInsensitive = false, 
     filesScanned: files.length,
     filesMatched: results.length,
     filesSkippedBinary,
-    truncated // true if results were cut short by the output size cap, not just maxResults
+    truncated, // true if results were cut short by the output size cap, not just maxResults
+    vanillaReadBytes // real byte total of matched files — the Read-equivalent cost this call avoided
   };
 }
 
@@ -522,7 +558,11 @@ function leanEdit({ edits }) {
   }
 
   const applied = writePlan.reduce((n, wp) => n + wp.editCount, 0);
-  const result = { ok: true, applied, filesWritten: writePlan.map(wp => wp.displayFile) };
+  // REAL, not estimated: the actual byte size of every file this batch
+  // touched — a normal Read-then-Edit workflow needs a full Read of each
+  // file first, and we already have those bytes in hand from originalRaw.
+  const vanillaReadBytes = writePlan.reduce((n, wp) => n + wp.originalRaw.length, 0);
+  const result = { ok: true, applied, filesWritten: writePlan.map(wp => wp.displayFile), vanillaReadBytes };
   if (fuzzyUsed.length) result.fuzzyMatches = fuzzyUsed; // always visible, never a silent swap
   return result;
 }
@@ -609,7 +649,15 @@ function handle(req) {
         outputBytes: outStr.length,
         estInputTokens: estimateTokens(before),
         estOutputTokens: estimateTokens(outStr.length),
-        callsAvoided: callsAvoidedFor(name, args, out)
+        callsAvoided: callsAvoidedFor(name, args, out),
+        // REAL avoided-token estimate: tokens(bytes of the files a vanilla
+        // Read would have returned in full) minus tokens(what THIS call
+        // actually returned). Floored at 0 — if a call's own output
+        // somehow exceeded the vanilla baseline, that's not a saving.
+        // This is computed from real file bytes we already read, not a
+        // guess; still an estimate only insofar as bytes/4 is (labeled
+        // as such everywhere it's shown).
+        estTokensAvoided: Math.max(0, estimateTokens(out.vanillaReadBytes || 0) - estimateTokens(outStr.length))
       });
       return reply({ content: [{ type: 'text', text: outStr }] });
     } catch (e) {
@@ -639,6 +687,7 @@ try {
 // stdio loop that waits forever for input the test never sends.
 if (require.main === module) {
   log('fleet-lean Cloud membership (cached):', isCloudMember ? 'active' : 'free tier');
+  pruneOldSidecars();
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
   rl.on('line', line => {
     if (!line.trim()) return;
@@ -654,5 +703,5 @@ if (require.main === module) {
 
 module.exports = {
   globToRegExp, normalizeForMatch, findAllMatches, applyReplace, leanSearch, leanEdit, handle,
-  callsAvoidedFor, updateRollup, ROLLUP_FILE
+  callsAvoidedFor, updateRollup, ROLLUP_FILE, pruneOldSidecars, SESS_DIR
 };

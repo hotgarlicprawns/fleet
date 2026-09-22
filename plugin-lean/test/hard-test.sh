@@ -367,6 +367,124 @@ if [ $? -eq 0 ]; then pass "brace-hang fix and round-robin ranking both hold"; e
 rm -rf "$GLOB_DIR"
 
 # ---------------------------------------------------------------------------
+section "12. real (code-computed) tokens-avoided baseline, PID correlation, sidecar pruning"
+REPORT_DIR=$(mktemp -d)
+node -e "
+const { leanSearch, leanEdit } = require('$SERVER');
+const fs = require('fs');
+const D = '$REPORT_DIR';
+let pass = 0, fail = 0;
+function check(name, cond) { if (cond) { console.log('  PASS  ' + name); pass++; } else { console.log('  FAIL  ' + name); fail++; } }
+
+// vanillaReadBytes on lean_search is the REAL byte size of matched files,
+// not a guess — verify it against the actual file we wrote.
+const content = 'needle\n'.repeat(50);
+fs.writeFileSync(D + '/a.txt', content);
+let r = leanSearch({ pattern: '**/*.txt', query: 'needle', cwd: D });
+check('lean_search vanillaReadBytes equals the real matched-file size', r.vanillaReadBytes === Buffer.byteLength(content));
+
+// vanillaReadBytes on lean_edit is the real size of every file it read.
+fs.writeFileSync(D + '/b.txt', 'hello world\n');
+r = leanEdit({ edits: [{ file: D + '/b.txt', find: 'hello world', replace: 'HELLO WORLD' }] });
+check('lean_edit vanillaReadBytes equals the real file size read', r.ok === true && r.vanillaReadBytes === Buffer.byteLength('hello world\n'));
+
+process.exitCode = fail === 0 ? 0 : 1;
+"
+if [ $? -eq 0 ]; then pass "real avoided-bytes baseline holds for both tools"; else fail "avoided-bytes baseline regression"; fi
+rm -rf "$REPORT_DIR"
+
+PID_DIR=$(mktemp -d)
+XDG_CONFIG_HOME="$PID_DIR/cfg" node -e "
+// Full pipeline: a real tools/call through handle() should write claudePid
+// === process.ppid into the sidecar it creates, and estTokensAvoided should
+// be present and > 0 for a call that actually avoided reading real bytes.
+const { handle } = require('$SERVER');
+const fs = require('fs');
+const path = require('path');
+// a big file with only ONE matching line — the realistic case where a
+// snippet is genuinely much smaller than the full file it came from (a
+// file where every line matches, tried first, correctly reported 0
+// avoided tokens once JSON-escaping overhead was accounted for — that
+// was this test's own bug, not the product's, caught by actually running
+// it rather than assuming the fixture was realistic)
+fs.writeFileSync('$PID_DIR/x.txt', 'padding line, not a match, filler text to bulk out the file\n'.repeat(500) + 'needle here\n');
+handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+handle({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'lean_search', arguments: { pattern: '**/*.txt', query: 'needle', cwd: '$PID_DIR' } } });
+
+const dir = path.join('$PID_DIR/cfg', 'fleet', 'sessions');
+const files = fs.readdirSync(dir).filter(f => f.endsWith('.lean.json')).map(f => path.join(dir, f));
+const d = JSON.parse(fs.readFileSync(files[0], 'utf8'));
+let pass = 0, fail = 0;
+function check(name, cond) { if (cond) { console.log('  PASS  ' + name); pass++; } else { console.log('  FAIL  ' + name); fail++; } }
+check('sidecar claudePid equals this process\'s own ppid (real correlation key)', d.claudePid === process.ppid);
+check('recorded call carries estTokensAvoided > 0 for a real avoided-bytes case', d.calls.some(c => (c.estTokensAvoided || 0) > 0));
+process.exitCode = fail === 0 ? 0 : 1;
+"
+if [ $? -eq 0 ]; then pass "claudePid correlation and estTokensAvoided both real and present"; else fail "PID correlation or estTokensAvoided regression"; fi
+rm -rf "$PID_DIR"
+
+PRUNE_DIR=$(mktemp -d)
+# pruneOldSidecars is bound to SESS_DIR computed at require-time from
+# XDG_CONFIG_HOME, so isolate it the same way every other test here does.
+XDG_CONFIG_HOME="$PRUNE_DIR/cfg" node -e "
+const fs = require('fs');
+const path = require('path');
+const dir = path.join('$PRUNE_DIR/cfg', 'fleet', 'sessions');
+fs.mkdirSync(dir, { recursive: true });
+const old = path.join(dir, 'old.lean.json');
+const recent = path.join(dir, 'recent.lean.json');
+const hudFile = path.join(dir, 'hud-old.json');
+fs.writeFileSync(old, '{}'); fs.writeFileSync(recent, '{}'); fs.writeFileSync(hudFile, '{}');
+const oldTime = new Date(Date.now() - 40*864e5);
+fs.utimesSync(old, oldTime, oldTime); fs.utimesSync(hudFile, oldTime, oldTime);
+const { pruneOldSidecars } = require('$SERVER');
+pruneOldSidecars();
+let pass = 0, fail = 0;
+function check(name, cond) { if (cond) { console.log('  PASS  ' + name); pass++; } else { console.log('  FAIL  ' + name); fail++; } }
+check('30+ day old .lean.json sidecar pruned', !fs.existsSync(old));
+check('recent .lean.json sidecar kept', fs.existsSync(recent));
+check('non-.lean.json (HUD) sidecar never touched even if old', fs.existsSync(hudFile));
+process.exitCode = fail === 0 ? 0 : 1;
+"
+if [ $? -eq 0 ]; then pass "sidecar pruning bounds disk growth without touching HUD sidecars"; else fail "sidecar pruning regression"; fi
+rm -rf "$PRUNE_DIR"
+
+# ---------------------------------------------------------------------------
+section "13. report.js — code-computed numbers, no LLM arithmetic"
+RPT_DIR=$(mktemp -d)
+XDG_CONFIG_HOME="$RPT_DIR/cfg" node -e "
+const fs = require('fs');
+const path = require('path');
+const dir = path.join('$RPT_DIR/cfg', 'fleet', 'sessions');
+fs.mkdirSync(dir, { recursive: true });
+fs.writeFileSync(path.join(dir, 'mine.lean.json'), JSON.stringify({
+  runId: 'mine', pid: 1, claudePid: process.ppid,
+  calls: [{ tool: 'lean_search', callsAvoided: 5, estInputTokens: 10, estOutputTokens: 100, estTokensAvoided: 2000 }]
+}));
+fs.writeFileSync(path.join(dir, 'other.lean.json'), JSON.stringify({
+  runId: 'other', pid: 2, claudePid: 999999,
+  calls: [{ tool: 'lean_search', callsAvoided: 999, estTokensAvoided: 999999 }]
+}));
+" 2>&1
+RPT_OUT_FILE="$RPT_DIR/report-out.txt"
+# NOTE: must NOT run via $(...) command substitution — that forks a subshell,
+# giving node a DIFFERENT ppid than the plain `node -e` write above (which
+# runs directly under this script's own PID). A plain `>` redirect does not
+# fork a subshell, so this keeps both node invocations sharing the same
+# parent PID, exactly like the real statusline.sh + MCP-server relationship
+# this correlation is modeling. (Caught by actually running this test —
+# the first version used $(...) here and always hit the fallback path.)
+XDG_CONFIG_HOME="$RPT_DIR/cfg" node "$PWD/report.js" > "$RPT_OUT_FILE" 2>&1
+OUT=$(cat "$RPT_OUT_FILE")
+echo "$OUT" | sed 's/^/     /'
+if echo "$OUT" | grep -q "calls avoided:       5" && ! echo "$OUT" | grep -q "999999"; then
+  pass "report.js sums only THIS session's sidecar (real PID match), excludes the other session's numbers"
+else
+  fail "report.js did not correctly isolate this session's numbers"
+fi
+rm -rf "$RPT_DIR"
+
+# ---------------------------------------------------------------------------
 git -C . worktree remove --force "$T" 2>/dev/null || rm -rf "$T"
 
 echo

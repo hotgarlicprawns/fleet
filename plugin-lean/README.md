@@ -51,19 +51,45 @@ savings. fleet-lean's savings numbers are computed and stored entirely under
 /fleet-lean-report
 ```
 
-Reads the current session's sidecar (`~/.config/fleet/sessions/*.lean.json`)
-and estimates tool calls and tokens avoided. Token counts are a `bytes/4`
-estimate, not exact — labeled as such. A dollar figure only appears if you've
-also run `fleet hud install` (from the main `fleet` CLI), so there's real
-cost data to convert against; otherwise it just shows token counts.
+Runs `report.js`, which computes every number **in code**, not by asking the
+model to read the sidecar JSON and do the arithmetic itself (an earlier
+version did exactly that, and a review found it produced inconsistent totals
+run to run). It reports:
 
-`/fleet-lean-report` also prints an **all-time (this machine)** line, from a
-small local rollup (`~/.config/fleet/lean-savings.json`) the server updates on
-every call — still local-only, still free, no account. It reports "calls
-avoided" as an exact count (derived from the tool's own output, not a guess)
-and "estimated tokens used by fleet-lean" separately — it does not invent a
-single "tokens saved" number, since we never ran the calls it avoided and
-don't actually know what they'd have cost.
+- **calls avoided** — an exact count, from the tool's own output (e.g.
+  `lean_search` replacing `1 Glob + 1 Grep + N Read`), never an estimate.
+- **est. tokens avoided** — a real, defensible baseline: the actual byte size
+  of every file `lean_search`/`lean_edit` read (which a normal workflow would
+  have paid for via `Read`), minus what the fused call actually returned,
+  converted to tokens via the same `bytes/4` heuristic used everywhere else
+  in this project (labeled as an estimate, never presented as exact). This
+  is computed from real bytes already in hand — not the tool guessing what
+  a hypothetical `Read` "would probably" have cost.
+- an **all-time (this machine)** line from a small local rollup
+  (`~/.config/fleet/lean-savings.json`) the server updates on every call —
+  still local-only, still free, no account.
+
+The report correlates "this session" by matching `claudePid` — the parent
+`claude` process's PID, which both the fleet-lean MCP server and any Bash
+tool call share as their direct parent (verified empirically, not assumed).
+If nothing matches — e.g. an older sidecar written before this existed — it
+falls back to the most-recently-modified sidecar and says so plainly, rather
+than silently attributing another pane's numbers to this one (the old,
+recency-only heuristic could and did do exactly that with multiple panes
+open, which is Fleet's normal use case).
+
+A dollar figure only appears if you've also run `fleet hud install` (from the
+main `fleet` CLI) — the HUD sidecar only stores a total cost, not a token
+count, so there's no honest $/token ratio to derive without one; the report
+says so rather than guessing.
+
+## HUD integration
+
+If you've run `fleet hud install`, the statusline also shows this session's
+running total next to the cost and context bars — `lean ↓9.7k tok (est.)` —
+using the same real, code-computed number and the same `claudePid`
+correlation as the report above (the HUD's own sidecar now records its
+`claudePid` too, added specifically to make this correlation possible).
 
 ## fleet-lean Cloud (optional, not live yet)
 

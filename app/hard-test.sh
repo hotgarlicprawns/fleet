@@ -110,6 +110,52 @@ rss2=$(total_rss_mb "$p")
 echo "     RSS after 20s: ${rss2}MB"
 
 # ---------------------------------------------------------------------------
+section "3b. load: panes actually WORKING — sustained heavy terminal output"
+# Section 3 above proves idle panes (a bare sleep loop, no output) don't
+# crash. That's not the scenario the user actually asked about — "a bunch
+# of terminals open and they are working". A real agent session streams
+# continuous text. This is what would expose an unbounded SwiftTerm
+# scrollback buffer (TerminalPane.swift sets no explicit scrollback limit —
+# it relies on SwiftTerm's own default of 500 lines, unverified until now
+# that it actually holds RSS flat under real output volume rather than
+# growing per byte printed).
+python3 - > "$APPJSON" <<'PYEOF'
+import json
+# Each pane prints a timestamped ~200-byte line as fast as it can, forever —
+# meaningfully more output per second than a real Claude Code session, to
+# make an unbounded-buffer leak show up fast rather than needing hours.
+cmd = "yes 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'"
+screens = [{"name": f"h{i}", "panes": [
+    {"name": f"p{j}", "command": cmd, "cwd": "/tmp"}
+    for j in range(6)
+]} for i in range(6)]
+json.dump({"screens": screens, "power": "Display on"}, open('/dev/stdout', 'w'))
+PYEOF
+launch 10
+p=$(app_pid)
+n=$(child_count "$p")
+[ "$n" = "36" ] && pass "36/36 heavy-output PTYs spawned" || fail "expected 36 children, got $n"
+r0=$(total_rss_mb "$p"); echo "     RSS at ~10s of heavy output: ${r0}MB"
+sleep 25
+r1=$(total_rss_mb "$p"); echo "     RSS at ~35s: ${r1}MB"
+sleep 25
+r2=$(total_rss_mb "$p"); echo "     RSS at ~60s: ${r2}MB"
+n2=$(child_count "$p")
+[ "$n2" = "36" ] && pass "all 36 still alive after 60s of continuous output" || fail "pane died under sustained output: $n2/36 alive"
+# The real test: growth from the second to third sample (buffer should
+# already be full/steady-state by ~35s at this output rate) should be
+# small — a scrollback cap holding means RSS goes flat, not a straight
+# line up. A generous threshold (150MB) catches an actual unbounded-buffer
+# leak while tolerating normal allocator noise.
+growth=$(( ${r2:-0} - ${r1:-0} ))
+echo "     RSS growth from ~35s to ~60s: ${growth}MB"
+if [ "${r1:-9999}" -gt 0 ] && [ "$growth" -lt 150 ] 2>/dev/null; then
+  pass "RSS growth stays flat under sustained heavy output (scrollback cap holds, ${growth}MB growth)"
+else
+  fail "RSS grew ${growth}MB in 25s of continued output — scrollback buffer may be unbounded"
+fi
+
+# ---------------------------------------------------------------------------
 section "4. crash resilience (kill -9)"
 p=$(app_pid)
 kill -9 "$p" 2>/dev/null

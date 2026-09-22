@@ -7,14 +7,17 @@ Run the whole automated suite yourself any time:
 ./soak-test.sh &        # separate instance + config; see its header. `./soak-test.sh stop` ends it.
 ```
 
-Last full run: **46 passed, 0 failed, 1 skipped** (the skip is real UI automation, which
+Last full run: **50 passed, 0 failed, 1 skipped** (the skip is real UI automation, which
 needs Accessibility permission). The suite runs as an entitled "owner" except section 7c,
 which manages entitlement itself; it can't click, so it drives the app through a small
 control file (`~/.config/fleet/control.json`).
 
-Sections: 1 build · 2 config resilience · 3 load (36 PTYs) · 4 kill -9 · 5 git worktrees + real
-remote · 6 polling scale · 7 clean quit · 7b close/shrink kills agents · 7d safe worktree
-cleanup · 7e window hide/summon/hotkey · 7c licensing (12 checks incl. live Dodo endpoint) · 8 UI.
+Sections: 1 build · 2 config resilience · 3 load (36 idle PTYs) · 3b load (36 panes under
+**sustained heavy continuous output**, not idle — this is the "many terminals actually
+working" scenario, added 2026-09-23 because the original section 3 only proved idle panes
+don't crash) · 4 kill -9 · 5 git worktrees + real remote · 6 polling scale · 7 clean quit ·
+7b close/shrink kills agents · 7d safe worktree cleanup · 7e window hide/summon/hotkey ·
+7c licensing (12 checks incl. live Dodo endpoint) · 8 UI.
 
 **Known unexplained flake:** in one full run, 7e failed four checks (no visible window, pane
 never spawned) and then passed on every rerun — alone, after 7d, and in two more full runs,
@@ -30,8 +33,9 @@ again, `/tmp/fleet-7e-fail.log` holds the app log.
 | Agents die with their screen | 3 screens, compound command so the agent is a *grandchild* of its shell | closing a screen and removing panes kill the whole process group; mutation-tested (disabling the fix fails both checks) |
 | Licensing | trial expired / active / owner, over-cap panes, bogus keys | free cap locks panes without deleting them; unlock/lapse flip live; blocked adds prompt; unreachable server and a bogus key against the live Dodo endpoint both handled |
 | Worktree cleanup | clean + dirty worktree, agent inside | clean one removed after its agent stopped; the one with uncommitted work is kept, file intact |
-| Many concurrent panes | 6 screens × 6 panes = 36 real PTYs | 36/36 spawned; ~400MB RSS at startup settling to ~155MB idle; CPU near 0% once idle; 81 FDs held (limit 61,440/process) |
-| Sustained run | same 36 panes, watched over several minutes | no memory growth, no crash, all children stayed alive |
+| Many concurrent panes | 6 screens × 6 panes = 36 real PTYs, idle (`sleep` loop, no output) | 36/36 spawned; ~400MB RSS at startup settling to ~155MB idle; CPU near 0% once idle; 81 FDs held (limit 61,440/process) |
+| Sustained run | same 36 idle panes, watched over several minutes | no memory growth, no crash, all children stayed alive |
+| **Panes actually working** (not idle) | 36 real PTYs, each streaming continuous heavy text output (`yes` printing ~200-byte lines as fast as possible — more output/sec than a real Claude Code session) for 60s | RSS 364MB → 359MB → 357MB over 60s (**flat, not growing** — SwiftTerm's default 500-line scrollback cap holds even under sustained heavy output); all 36 panes still alive |
 | Clean quit | quit the app normally | power assertion released, no orphaned child processes |
 | Force-kill (`kill -9`) | killed the app process directly | power assertion auto-released by the kernel (tied to the process, not a shelled-out `caffeinate`); PTY children died with the parent — **no orphans** |
 | Repeated launch | 4x cold launch/quit cycles | reliable single window every time (this exposed and fixed a phantom-window bug) |
