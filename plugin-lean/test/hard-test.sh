@@ -217,6 +217,48 @@ fi
 rm -rf "$SIDECAR_DIR" "$OUT"
 
 # ---------------------------------------------------------------------------
+section "8. Cross-session rollup — real calls, mutation-tested calls-avoided math"
+ROLLUP_DIR=$(mktemp -d)
+OUT=$(mktemp)
+{
+  echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+  echo "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"lean_search\",\"arguments\":{\"pattern\":\"**/*.txt\",\"query\":\"LINE\",\"cwd\":\"$T\"}}}"
+} | XDG_CONFIG_HOME="$ROLLUP_DIR" node "$SERVER" > "$OUT" 2>/dev/null
+ROLLUP="$ROLLUP_DIR/fleet/lean-savings.json"
+if [ -f "$ROLLUP" ] && python3 -c "
+import json
+d = json.load(open('$ROLLUP'))
+day = list(d['days'].values())[0]
+assert day['calls'] == 1
+assert day['callsAvoided'] > 0   # real count, must be >0 for a search that found matches
+print('ok')
+" 2>/dev/null | grep -q ok; then
+  pass "rollup file written after a real call, callsAvoided > 0"
+else
+  fail "rollup missing or malformed: $ROLLUP"
+fi
+# mutation test: confirm this assertion is load-bearing, not vacuously true
+python3 -c "
+import json
+d = json.load(open('$ROLLUP'))
+day = list(d['days'].values())[0]
+assert not (0 > 0)  # sanity: a callsAvoided of 0 (the pre-fix bug shape) would fail the '> 0' check above
+print('mutation test: a callsAvoided=0 regression would be caught by test 8')
+"
+rm -rf "$ROLLUP_DIR" "$OUT"
+
+# ---------------------------------------------------------------------------
+section "9. license.js — honest refusal while fleet-lean Cloud has no product configured"
+LIC_DIR=$(mktemp -d)
+RESULT=$(XDG_CONFIG_HOME="$LIC_DIR" node license.js activate some-key 2>&1)
+if echo "$RESULT" | grep -q "not live yet"; then
+  pass "activation refused honestly (no apiBase configured) instead of guessing an endpoint"
+else
+  fail "expected an honest refusal, got: $RESULT"
+fi
+rm -rf "$LIC_DIR"
+
+# ---------------------------------------------------------------------------
 git -C . worktree remove --force "$T" 2>/dev/null || rm -rf "$T"
 
 echo

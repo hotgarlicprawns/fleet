@@ -30,22 +30,60 @@ function log(...args) { process.stderr.write('[fleet-lean] ' + args.join(' ') + 
 // separate file so the two writers never race on the same path.
 // ---------------------------------------------------------------------------
 
-const SESS_DIR = path.join(
-  process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'),
-  'fleet', 'sessions'
-);
+const CFG_DIR = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'fleet');
+const SESS_DIR = path.join(CFG_DIR, 'sessions');
+const ROLLUP_FILE = path.join(CFG_DIR, 'lean-savings.json');
 const RUN_ID = `${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
 const SIDECAR = path.join(SESS_DIR, `${RUN_ID}.lean.json`);
 
 const estimateTokens = bytes => Math.ceil(bytes / 4); // chars/4 heuristic; no tokenizer dependency
 
+/** Real (not estimated) count of built-in tool calls a fused call replaced —
+ *  the exact heuristic documented in commands/fleet-lean-report.md, computed
+ *  once here so the sidecar, the all-time rollup and the report all agree:
+ *    lean_search -> 1 Glob + 1 Grep + filesMatched Reads
+ *    lean_edit   -> 2 calls (Read + Edit) per edit in the batch
+ *  This is a call *count*, which is exact given the tool's own output — it
+ *  is deliberately NOT a "tokens saved" figure, since we never ran the
+ *  avoided calls and don't know what they'd have cost (see real-metrics
+ *  discipline: don't invent a number you can't back up). */
+function callsAvoidedFor(name, args, out) {
+  if (name === 'lean_search') return 1 + 1 + (out.filesMatched || 0);
+  if (name === 'lean_edit') return 2 * ((args && args.edits && args.edits.length) || 0);
+  return 0;
+}
+
 let calls = [];
 function recordCall(rec) {
-  calls.push({ ts: new Date().toISOString(), ...rec });
+  const withTs = { ts: new Date().toISOString(), ...rec };
+  calls.push(withTs);
   try {
     fs.mkdirSync(SESS_DIR, { recursive: true });
     fs.writeFileSync(SIDECAR, JSON.stringify({ runId: RUN_ID, pid: process.pid, calls }, null, 2));
   } catch (e) { log('sidecar write failed:', e.message); }
+  updateRollup(withTs); // must be the timestamped copy — the original `rec` has no .ts
+}
+
+/** Persistent local, cross-session rollup on this machine — free tier,
+ *  no account, no network. Read-modify-write against a single small JSON
+ *  file; not lock-protected (same best-effort tradeoff every other sidecar
+ *  in this codebase makes — a lost update under true concurrent writers is
+ *  a rollup undercount, never a crash or a fabricated number). */
+function updateRollup(rec) {
+  const day = rec.ts.slice(0, 10); // YYYY-MM-DD, UTC — matches ts's own ISO format
+  let data;
+  try { data = JSON.parse(fs.readFileSync(ROLLUP_FILE, 'utf8')); } catch { data = { days: {} } }
+  if (!data.days) data.days = {};
+  const bucket = data.days[day] || { calls: 0, callsAvoided: 0, estTokens: 0, runs: [] };
+  bucket.calls += 1;
+  bucket.callsAvoided += rec.callsAvoided || 0;
+  bucket.estTokens += (rec.estInputTokens || 0) + (rec.estOutputTokens || 0);
+  if (!bucket.runs.includes(RUN_ID)) bucket.runs.push(RUN_ID);
+  data.days[day] = bucket;
+  try {
+    fs.mkdirSync(CFG_DIR, { recursive: true });
+    fs.writeFileSync(ROLLUP_FILE, JSON.stringify(data, null, 2));
+  } catch (e) { log('rollup write failed:', e.message); }
 }
 
 // ---------------------------------------------------------------------------
@@ -380,7 +418,8 @@ function handle(req) {
         inputBytes: before,
         outputBytes: outStr.length,
         estInputTokens: estimateTokens(before),
-        estOutputTokens: estimateTokens(outStr.length)
+        estOutputTokens: estimateTokens(outStr.length),
+        callsAvoided: callsAvoidedFor(name, args, out)
       });
       return reply({ content: [{ type: 'text', text: outStr }] });
     } catch (e) {
@@ -390,9 +429,26 @@ function handle(req) {
   return replyErr(-32601, `unknown method: ${method}`);
 }
 
+// ---------------------------------------------------------------------------
+// fleet-lean Cloud membership — cached-only at startup, never blocks the
+// server on a network call. `license.js` is the thing that actually talks
+// to Dodo (on-demand, via the /fleet-lean-license command); this just reads
+// whatever it last cached, so a subscriber's status here can be up to
+// license.js's own offline-grace window stale. Not wired to gate anything
+// yet — there is no cloud sync endpoint to gate (see plugin-lean/README.md
+// for why), this only makes the cached status observable/loggable so the
+// sync feature has a home to plug into once that endpoint exists.
+// ---------------------------------------------------------------------------
+let isCloudMember = false;
+try {
+  const { cachedMembership } = require('../license.js');
+  isCloudMember = cachedMembership();
+} catch (e) { /* license.js missing or unreadable license file — free tier, not an error */ }
+
 // Guarded so `require()`-ing this file for unit tests doesn't also start a
 // stdio loop that waits forever for input the test never sends.
 if (require.main === module) {
+  log('fleet-lean Cloud membership (cached):', isCloudMember ? 'active' : 'free tier');
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
   rl.on('line', line => {
     if (!line.trim()) return;
@@ -406,4 +462,7 @@ if (require.main === module) {
   log('fleet-lean MCP server ready, run', RUN_ID);
 }
 
-module.exports = { globToRegExp, normalizeForMatch, findAllMatches, applyReplace, leanSearch, leanEdit, handle };
+module.exports = {
+  globToRegExp, normalizeForMatch, findAllMatches, applyReplace, leanSearch, leanEdit, handle,
+  callsAvoidedFor, updateRollup, ROLLUP_FILE
+};

@@ -1,0 +1,7 @@
+{
+  "name": "fleet-lean Cloud",
+  "productId": "",
+  "checkoutUrl": "",
+  "apiBase": "",
+  "note": "Empty until the user creates a recurring subscription product in the Dodo dashboard (same as product.json at the repo root). Until apiBase is set, license.js refuses to activate rather than guessing an endpoint. Run scripts/set-product.sh style wiring once real — see plugin-lean/README.md."
+}

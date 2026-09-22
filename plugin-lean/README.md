@@ -18,7 +18,7 @@ savings. fleet-lean's savings numbers are computed and stored entirely under
 ## Install
 
 ```
-/plugin marketplace add ~/Projects/fleet
+/plugin marketplace add hotgarlicprawns/fleet
 /plugin install fleet-lean@fleet-marketplace
 ```
 
@@ -45,6 +45,31 @@ and estimates tool calls and tokens avoided. Token counts are a `bytes/4`
 estimate, not exact — labeled as such. A dollar figure only appears if you've
 also run `fleet hud install` (from the main `fleet` CLI), so there's real
 cost data to convert against; otherwise it just shows token counts.
+
+`/fleet-lean-report` also prints an **all-time (this machine)** line, from a
+small local rollup (`~/.config/fleet/lean-savings.json`) the server updates on
+every call — still local-only, still free, no account. It reports "calls
+avoided" as an exact count (derived from the tool's own output, not a guess)
+and "estimated tokens used by fleet-lean" separately — it does not invent a
+single "tokens saved" number, since we never ran the calls it avoided and
+don't actually know what they'd have cost.
+
+## fleet-lean Cloud (optional, not live yet)
+
+A subscription add-on is planned for **cross-machine savings sync** — the
+above all-time rollup, but synced across every Mac you use fleet-lean on,
+plus a small history view. This is the only thing that will ever require
+payment or an account here; `lean_search`, `lean_edit`, and the local,
+this-machine report stay free forever, per the promise above.
+
+- `plugin-lean/license.js` and `/fleet-lean-license` (activate/validate/
+  deactivate) exist and work against Dodo Payments' license endpoints — same
+  pattern as the main `fleet` CLI's licensing — but `plugin-lean/product.json`
+  has no product configured yet, so activation currently refuses honestly
+  rather than pretending to work.
+- There is no sync server yet. Until one exists, the fleet-lean Cloud
+  subscription has nothing to actually gate — don't buy it expecting a
+  dashboard today.
 
 ## What this is not (yet)
 

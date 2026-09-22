@@ -1,7 +1,7 @@
 {
   "name": "fleet-lean",
-  "version": "0.1.0",
-  "description": "Fused search + batch multi-file edit tools for Claude Code, cutting tool round-trips and token spend. No account, no cloud — runs entirely as a local process.",
+  "version": "0.2.0",
+  "description": "Fused search + batch multi-file edit tools for Claude Code, cutting tool round-trips and token spend. Core tools need no account, no cloud — an optional fleet-lean Cloud subscription (not live yet) will add cross-machine savings sync.",
   "author": { "name": "bishesh" },
   "commands": "./commands",
   "mcpServers": {

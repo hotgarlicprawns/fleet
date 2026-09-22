@@ -43,7 +43,7 @@ for the CLI's config; the app has its own settings built in.
 Claude Code plugin (auto power-management + attention flags per session):
 
 ```
-/plugin marketplace add ~/Projects/fleet
+/plugin marketplace add hotgarlicprawns/fleet
 /plugin install fleet@fleet-marketplace
 ```
 
@@ -56,8 +56,12 @@ cloud, no dependency on the rest of fleet. See [plugin-lean/README.md](plugin-le
 
 ```
 /plugin install fleet-lean@fleet-marketplace
-/fleet-lean-report      # after a session, see calls/tokens it saved
+/fleet-lean-report      # after a session, see calls/tokens it saved (session + all-time, this machine)
 ```
+
+An optional **fleet-lean Cloud** subscription (not live yet — no product configured,
+no sync server built) is planned for cross-machine savings sync; the tools and the
+local report above stay free forever regardless of whether that ships.
 
 ## The HUD — cost & context per session
 
