@@ -1,0 +1,541 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1"><style>:root{color-scheme:light}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>fleet — every agent, one screen</title>
+<meta name="description" content="A native Mac cockpit for Claude Code and Codex: a screen per task with its own git worktree, cost and rate limits on every pane, and a Mac that stays awake.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --ground: #f4f2ec;
+    --panel: #ffffff;
+    --panel-2: #eceae2;
+    --ink: #1b1f26;
+    --ink-soft: #55606e;
+    --ink-faint: #8b95a2;
+    --line: #dcd9cf;
+    --line-strong: #c6c2b4;
+    --accent: #0e9c80;
+    --accent-ink: #0b5d4d;
+    --awake: #b9791a;
+    --term-bg: #12161d;
+    --term-ink: #cdd3db;
+    --term-dim: #6b7684;
+    --term-line: #232a35;
+    --shadow: 0 1px 2px rgba(20,24,30,.06), 0 12px 40px -12px rgba(20,24,30,.18);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0c0f14;
+      --panel: #141922;
+      --panel-2: #1b212c;
+      --ink: #dce1e8;
+      --ink-soft: #9aa4b1;
+      --ink-faint: #6b7480;
+      --line: #232a35;
+      --line-strong: #313a47;
+      --accent: #5fe3c2;
+      --accent-ink: #9defd6;
+      --awake: #e6b667;
+      --term-bg: #0a0d12;
+      --term-ink: #cdd3db;
+      --term-dim: #626d7b;
+      --term-line: #1e2530;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 18px 50px -14px rgba(0,0,0,.6);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0c0f14;
+    --panel: #141922;
+    --panel-2: #1b212c;
+    --ink: #dce1e8;
+    --ink-soft: #9aa4b1;
+    --ink-faint: #6b7480;
+    --line: #232a35;
+    --line-strong: #313a47;
+    --accent: #5fe3c2;
+    --accent-ink: #9defd6;
+    --awake: #e6b667;
+    --term-bg: #0a0d12;
+    --term-ink: #cdd3db;
+    --term-dim: #626d7b;
+    --term-line: #1e2530;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 18px 50px -14px rgba(0,0,0,.6);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.68;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 0 32px; }
+  a { color: var(--accent-ink); text-underline-offset: 3px; }
+
+  .mono { font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace; }
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 11px; font-weight: 500; letter-spacing: .22em;
+    text-transform: uppercase; color: var(--ink-faint);
+    display: flex; align-items: center; gap: 12px;
+  }
+  .eyebrow::before {
+    content: ""; width: 24px; height: 1px; background: var(--accent);
+    display: inline-block; flex: none;
+  }
+
+  /* ---------- top bar ---------- */
+  header.bar {
+    border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--ground) 86%, transparent);
+    position: sticky; top: 0; z-index: 10; backdrop-filter: blur(8px);
+  }
+  .bar .wrap { display: flex; align-items: center; justify-content: space-between; height: 66px; }
+  .brand { font-family: "IBM Plex Mono", monospace; font-weight: 600; font-size: 15px; letter-spacing: .02em; }
+  .brand b { color: var(--accent-ink); font-weight: 700; }
+  .bar nav { display: flex; gap: 28px; font-size: 13.5px; }
+  .bar nav a { color: var(--ink-soft); text-decoration: none; transition: color .15s ease; }
+  .bar nav a:hover { color: var(--ink); }
+
+  /* ---------- hero ---------- */
+  .hero { padding: 104px 0 88px; }
+  .hero-grid { display: grid; grid-template-columns: 1fr 1.3fr; gap: 60px; align-items: center; }
+  h1 {
+    font-family: "IBM Plex Mono", monospace;
+    font-weight: 500;
+    font-size: clamp(2rem, 4.6vw, 2.9rem);
+    line-height: 1.14; letter-spacing: -.03em;
+    margin: 22px 0 0; text-wrap: balance;
+  }
+  h1 .accent { color: var(--accent-ink); font-weight: 600; }
+  .lede { color: var(--ink-soft); font-size: 1.04rem; margin: 22px 0 32px; max-width: 44ch; }
+  .cta-row { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+  .btn {
+    font-family: "IBM Plex Mono", monospace; font-size: 12.5px; font-weight: 500; letter-spacing: .01em;
+    padding: 12px 22px; border-radius: 6px; text-decoration: none; border: 1px solid transparent;
+    display: inline-flex; align-items: center; gap: 8px; transition: background .15s ease, border-color .15s ease;
+  }
+  .btn-primary { background: var(--accent); color: #08110e; font-weight: 600; }
+  .btn-primary:hover { filter: brightness(1.05); }
+  .btn-ghost { border-color: var(--line-strong); color: var(--ink-soft); }
+  .btn-ghost:hover { background: var(--panel-2); color: var(--ink); }
+  .install-hint { font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--ink-faint); margin-top: 16px; }
+  .install-hint b { color: var(--ink-soft); font-weight: 500; }
+
+  /* ---------- terminal mock ---------- */
+  .term {
+    background: var(--term-bg); border: 1px solid var(--term-line); border-radius: 11px;
+    box-shadow: var(--shadow); overflow: hidden;
+  }
+  .term-chrome {
+    display: flex; align-items: center; gap: 7px; padding: 10px 13px;
+    border-bottom: 1px solid var(--term-line);
+  }
+  .term { position: relative; }
+  .term::after {
+    content: ""; position: absolute; inset: 0; border-radius: 11px; pointer-events: none;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #3a4350; }
+  .dot:nth-child(1) { background: #56504a; }
+  .dot:nth-child(2) { background: #55503f; }
+  .dot:nth-child(3) { background: #3f4a44; }
+  .term-title {
+    margin-left: 10px; font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--term-dim);
+  }
+  .panes {
+    display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
+    gap: 1px; background: var(--term-line); height: 340px;
+  }
+  .pane {
+    background: var(--term-bg); padding: 12px 13px; overflow: hidden;
+    font-family: "IBM Plex Mono", monospace; font-size: 11.5px; line-height: 1.7; color: var(--term-ink);
+    opacity: 0; transform: scale(.985);
+    animation: paneIn .5s cubic-bezier(.2,.7,.3,1) forwards;
+  }
+  .pane:nth-child(1) { animation-delay: .15s; }
+  .pane:nth-child(2) { animation-delay: .45s; }
+  .pane:nth-child(3) { animation-delay: .75s; }
+  .pane:nth-child(4) { animation-delay: 1.05s; }
+  @keyframes paneIn { to { opacity: 1; transform: scale(1); } }
+  .pane .ph { color: var(--term-dim); }
+  .pane .ok { color: var(--accent); }
+  .pane .cur { background: var(--accent); color: var(--term-bg); animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 50% { background: transparent; color: transparent; } }
+  .pane-label {
+    font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--term-dim);
+    border-bottom: 1px solid var(--term-line); padding-bottom: 5px; margin-bottom: 7px;
+    display: flex; justify-content: space-between; gap: 8px; align-items: baseline;
+  }
+  .pane-label .pstat { letter-spacing: .02em; text-transform: none; color: var(--term-dim); }
+  .pane-label .pstat.warn { color: var(--awake); }
+  .pane-label .wait { color: var(--accent); }
+  .term-status {
+    display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 9px 14px;
+    border-top: 1px solid var(--term-line);
+    font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--term-dim);
+  }
+  .term-status b { color: var(--term-ink); font-weight: 500; }
+  .term-status .awake { color: var(--awake); }
+  .term-status .live { color: var(--accent); }
+
+  .term-body { display: grid; grid-template-columns: 138px 1fr; }
+  .side { border-right: 1px solid var(--term-line); padding: 12px 10px; font-family: "IBM Plex Mono", monospace; font-size: 10.5px; color: var(--term-dim); line-height: 2; }
+  .side .h { font-size: 9px; letter-spacing: .14em; text-transform: uppercase; margin: 8px 0 2px; }
+  .side .proj { color: var(--term-ink); }
+  .side .row { padding: 0 6px; border-radius: 4px; }
+  .side .row.on { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--term-ink); }
+  .side .row .b { color: var(--term-dim); }
+  .side .cx { color: #e8925a; }
+  .side .cl { color: var(--accent); }
+  .note { font-family: "IBM Plex Mono", monospace; font-size: 11.5px; color: var(--ink-faint); margin-top: 22px; max-width: 62ch; }
+  @media (prefers-reduced-motion: reduce) {
+    .pane { opacity: 1; transform: none; animation: none; }
+    .pane .cur { animation: none; }
+  }
+
+  /* ---------- sections ---------- */
+  section { padding: 92px 0; border-top: 1px solid var(--line); }
+  .sec-head { max-width: 50ch; margin-bottom: 52px; }
+  .sec-head h2 {
+    font-family: "IBM Plex Mono", monospace; font-weight: 500;
+    font-size: 1.5rem; letter-spacing: -.02em; line-height: 1.3; margin: 16px 0 0; text-wrap: balance;
+  }
+  .sec-head p { color: var(--ink-soft); margin: 14px 0 0; font-size: .98rem; }
+
+  .feat { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; }
+  .feat > div { padding: 4px 32px 4px 0; border-left: 1px solid var(--line); padding-left: 28px; }
+  .feat > div:first-child { border-left: none; padding-left: 0; }
+  .feat h3 { font-family: "IBM Plex Mono", monospace; font-weight: 500; font-size: .98rem; margin: 12px 0 8px; }
+  .feat p { margin: 0; color: var(--ink-soft); font-size: .9rem; }
+  .feat .tag { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; color: var(--ink-faint); letter-spacing: .14em; text-transform: uppercase; }
+
+  /* modes table */
+  .modes { width: 100%; border-collapse: collapse; font-size: .92rem; }
+  .modes th, .modes td { text-align: left; padding: 13px 16px; border-bottom: 1px solid var(--line); }
+  .modes th { font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-faint); font-weight: 600; }
+  .modes td:first-child { font-family: "IBM Plex Mono", monospace; color: var(--accent-ink); white-space: nowrap; }
+  .modes td.flags { font-family: "IBM Plex Mono", monospace; color: var(--ink-soft); }
+  .modes td { font-variant-numeric: tabular-nums; }
+  .modes tr:last-child td { border-bottom: none; }
+  .table-shell { border: 1px solid var(--line); border-radius: 10px; overflow-x: auto; background: var(--panel); }
+
+  /* pricing */
+  .price { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .plan { padding: 32px 30px; background: var(--panel); }
+  .plan + .plan { border-left: 1px solid var(--line); }
+  .plan.pro { background: var(--panel-2); }
+  .plan .name { font-family: "IBM Plex Mono", monospace; font-weight: 500; letter-spacing: .16em; text-transform: uppercase; font-size: 11px; color: var(--ink-faint); }
+  .plan.pro .name { color: var(--accent-ink); }
+  .plan .amt { font-family: "IBM Plex Mono", monospace; font-size: 1.9rem; font-weight: 500; margin: 14px 0 4px; letter-spacing: -.03em; }
+  .plan .amt span { font-size: .85rem; color: var(--ink-faint); font-weight: 400; letter-spacing: 0; }
+  .plan ul { list-style: none; padding: 0; margin: 20px 0 0; display: grid; gap: 10px; font-size: .9rem; }
+  .plan li { padding-left: 22px; position: relative; color: var(--ink-soft); }
+  .plan li::before { content: "›"; position: absolute; left: 4px; color: var(--accent-ink); font-family: "IBM Plex Mono", monospace; }
+
+  /* install */
+  .code {
+    background: var(--term-bg); border: 1px solid var(--term-line); border-radius: 11px;
+    padding: 20px 22px; overflow-x: auto;
+    font-family: "IBM Plex Mono", monospace; font-size: 12.5px; line-height: 1.85; color: var(--term-ink);
+  }
+  .code .c { color: var(--term-dim); }
+  .code .p { color: var(--accent); }
+
+  .gatekeeper {
+    display: flex; gap: 12px; align-items: flex-start;
+    background: var(--panel-2); border: 1px solid var(--line-strong); border-radius: 10px;
+    padding: 16px 18px; margin-top: 18px; font-size: .88rem; color: var(--ink-soft);
+  }
+  .gatekeeper b { color: var(--ink); }
+  .gatekeeper .mk { font-family: "IBM Plex Mono", monospace; color: var(--awake); flex: none; }
+
+  footer { border-top: 1px solid var(--line); padding: 40px 0 56px; color: var(--ink-faint); font-size: 12.5px; font-family: "IBM Plex Mono", monospace; }
+  footer .wrap { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+
+  @media (max-width: 860px) {
+    .hero { padding: 64px 0 56px; }
+    .hero-grid { grid-template-columns: 1fr; gap: 40px; }
+    section { padding: 64px 0; }
+    .feat { grid-template-columns: 1fr; gap: 28px; }
+    .feat > div { border-left: none; padding-left: 0; }
+    .price { grid-template-columns: 1fr; }
+    .plan + .plan { border-left: none; border-top: 1px solid var(--line); }
+    .bar nav { display: none; }
+    .panes { height: 300px; }
+    .term-body { grid-template-columns: 1fr; }
+    .side { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<header class="bar">
+  <div class="wrap">
+    <div class="brand"><b>fleet</b> ·</div>
+    <nav>
+      <a href="#screens">Screens</a>
+      <a href="#hud">The HUD</a>
+      <a href="#how">How it works</a>
+      <a href="#modes">Power modes</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#install">Install</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="hero">
+    <div class="hero-grid">
+      <div>
+        <div class="eyebrow">macOS · Claude Code · Codex</div>
+        <h1>Every session,<br><span class="accent">one screen.</span></h1>
+        <p class="lede">
+          A native Mac cockpit for Claude Code and Codex. A screen per task, each on
+          its own git worktree; cost, context and rate limits on every pane; and a
+          Mac that stays awake without touching your monitor layout.
+        </p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="https://github.com/hotgarlicprawns/fleet/releases/download/v0.3.0/Fleet-0.3.0.dmg">Download Fleet.app</a>
+          <a class="btn btn-ghost" href="#screens">How screens work</a>
+        </div>
+        <div class="install-hint">macOS 13+ · 1.8MB · or <b>$</b> /plugin marketplace add hotgarlicprawns/fleet</div>
+      </div>
+
+      <div class="term" aria-label="Fleet app: sidebar of projects and screens, four agent panes with cost and context on each">
+        <div class="term-chrome">
+          <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          <span class="term-title mono">Fleet · payments-fix</span>
+        </div>
+        <div class="term-body">
+        <div class="side">
+          <div class="h">Projects</div>
+          <div class="proj">▾ api</div>
+          <div class="row on">⌥ payments-fix</div>
+          <div class="row">claude 2</div>
+          <div class="proj">▾ web</div>
+          <div class="row"><span class="b">⌥</span> codex</div>
+          <div class="h">Hover a project</div>
+          <div><span class="cl">C</span> claude · <span class="cx">X</span> codex</div>
+        </div>
+        <div class="panes">
+          <div class="pane">
+            <div class="pane-label"><span>● api</span><span class="pstat">Sonnet 5 · $2.14 · ctx 47%</span></div>
+            <div><span class="ph">›</span> refactor auth middleware</div>
+            <div class="ok">✔ 14 files updated</div>
+            <div><span class="ph">›</span> run the tests <span class="cur">&nbsp;</span></div>
+          </div>
+          <div class="pane">
+            <div class="pane-label"><span>▲ web</span><span class="pstat warn">Opus 5 · $11.90 ⚠ · ctx 73%</span></div>
+            <div><span class="ph">›</span> draft migration 0042</div>
+            <div><span class="ph">…</span> writing schema</div>
+          </div>
+          <div class="pane">
+            <div class="pane-label"><span class="wait">● infra · waiting</span><span class="pstat">Sonnet 5 · $0.80</span></div>
+            <div><span class="ph">›</span> apply terraform plan?</div>
+            <div><span class="ph">›</span> <span class="cur">&nbsp;</span></div>
+          </div>
+          <div class="pane">
+            <div class="pane-label"><span>docs</span><span class="pstat">Haiku · $0.12 · ctx 9%</span></div>
+            <div><span class="ph">›</span> update changelog</div>
+            <div class="ok">✔ done</div>
+          </div>
+        </div>
+        </div>
+        <div class="term-status">
+          <span><b>4</b> panes</span>
+          <span class="live">$15.02 today</span>
+          <span class="awake">● display on</span>
+          <span>5h <b>34%</b> · 7d <b>12%</b></span>
+          <span>layout <b>untouched</b></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<section id="screens">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Screens</div>
+      <h2>One screen per task. Their own branch. Their own agents.</h2>
+      <p>Point a screen at a repo and Fleet checks out a separate git worktree for it, so
+      two agents never edit the same files. Every screen keeps running while you look at another.</p>
+    </div>
+    <div class="feat">
+      <div>
+        <div class="tag">isolated</div>
+        <h3>A worktree per screen</h3>
+        <p>Sync onto your base branch or push from the toolbar. Plain git — conflicts stop at the rebase and you resolve them in the pane.</p>
+      </div>
+      <div>
+        <div class="tag">both agents</div>
+        <h3>Claude and Codex, one click</h3>
+        <p>Hover a project in the sidebar and spin up a fresh <span class="mono">claude</span> or <span class="mono">codex</span> screen. Anything you can type in a terminal works as a pane command.</p>
+      </div>
+      <div>
+        <div class="tag">safe</div>
+        <h3>Closing never loses work</h3>
+        <p>Removing a worktree refuses if it has uncommitted changes. Closing the window hides it; agents keep going, and <span class="mono">⌃⌥F</span> brings it back.</p>
+      </div>
+    </div>
+    <p class="note">The cost, context and rate-limit HUD reads Claude Code's status line, so Codex panes run as plain terminals without it.</p>
+  </div>
+</section>
+
+<section id="hud">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">The HUD</div>
+      <h2>Cost and context, on every pane border.</h2>
+      <p>One click in the app (or <span class="mono">fleet hud install</span>) wires a
+      status line into Claude Code that renders your usage and records a small file
+      per session — so Fleet can paint each pane and total your spend. Your existing status line is kept and restored on removal.</p>
+    </div>
+    <div class="feat">
+      <div>
+        <div class="tag">live</div>
+        <h3>Per-session numbers</h3>
+        <p>Model, dollar cost, context&nbsp;% and your 5-hour / 7-day rate limits refresh on each pane every few seconds, amber then red as they climb.</p>
+      </div>
+      <div>
+        <div class="tag">attention</div>
+        <h3>Know who's stuck</h3>
+        <p>A border lights up when that Claude is waiting for you. <span class="mono">fleet next</span> jumps straight to it.</p>
+      </div>
+      <div>
+        <div class="tag">rollup</div>
+        <h3>Spend by project</h3>
+        <p>The spend report groups the last 24 hours and 7 days by project — “api $8.40 · web $3.10.” The toolbar total always matches it.</p>
+      </div>
+    </div>
+    <p class="note"><b class="mono" style="color:var(--accent-ink)">New, free, no account:</b> <span class="mono">fleet-lean</span> is a separate plugin — two tools that fuse search and multi-file edits into fewer, cheaper calls. <a href="#install">Install below.</a></p>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">The problem</div>
+      <h2>Three things break when you run Claude Code for hours.</h2>
+      <p>Windows scatter across the desktop. The Mac sleeps mid-task. And every
+      screen-blanking trick on an office laptop with a dead built-in panel
+      re-shuffles your external monitors. fleet fixes each one.</p>
+    </div>
+    <div class="feat">
+      <div>
+        <div class="tag">01 · tile</div>
+        <h3>One tiled grid</h3>
+        <p>The app tiles real terminals per screen. Prefer tmux? <span class="mono">fleet up</span> builds the same grid there, and survives a disconnect.</p>
+      </div>
+      <div>
+        <div class="tag">02 · stay awake</div>
+        <h3>Long runs don't sleep</h3>
+        <p>The app holds a native power assertion while Display on or System awake is selected — released the instant Fleet quits, even if it crashes.</p>
+      </div>
+      <div>
+        <div class="tag">03 · dark screen</div>
+        <h3>Blank, not rearranged</h3>
+        <p>Fleet never re-arranges your monitors. The window pins to a display of your choice and falls back if that display disappears — the dead-laptop-panel case.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="modes">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Power modes</div>
+      <h2>Pick how awake the machine stays.</h2>
+      <p>The CLI maps each mode to a precise set of <span class="mono">caffeinate</span> flags. The app offers Display on, System awake and Off using the native API.</p>
+    </div>
+    <div class="table-shell">
+      <table class="modes">
+        <thead><tr><th>Mode</th><th>caffeinate</th><th>Display</th><th>Use for</th></tr></thead>
+        <tbody>
+          <tr><td>awake-blank</td><td class="flags">-i -s</td><td>blanks (now or after N min)</td><td>Long unattended runs — default</td></tr>
+          <tr><td>awake-on</td><td class="flags">-d -i -s</td><td>stays on</td><td>Watching it work</td></tr>
+          <tr><td>prevent-all</td><td class="flags">-d -i -m -s</td><td>stays on</td><td>Disk-heavy builds</td></tr>
+          <tr><td>off</td><td class="flags">—</td><td>normal</td><td>Nothing at all</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section id="pricing">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Pricing</div>
+      <h2>14-day trial. One payment. Yours.</h2>
+      <p>Everything is unlocked for 14 days, no card. After that the HUD, spend report and worktrees stay free —
+      the free tier just runs 3 panes. Pro is a one-time key from Dodo Payments, good on 3 of your Macs,
+      checked online with a 7-day offline grace, with a 30-day refund.</p>
+    </div>
+    <div class="price">
+      <div class="plan">
+        <div class="name">Free</div>
+        <div class="amt">$0</div>
+        <ul>
+          <li>3 panes in total, across screens</li>
+          <li>Cost, context and rate-limit HUD</li>
+          <li>Spend report, git-worktree screens</li>
+          <li>Menu-bar item and <span class="mono">⌃⌥F</span> hotkey</li>
+          <li><span class="mono">fleet-lean</span> token-saving tools, free forever</li>
+        </ul>
+      </div>
+      <div class="plan pro">
+        <div class="name">Pro · one-time</div>
+        <div class="amt">$24 <span>launch · $39 after</span></div>
+        <ul>
+          <li>Up to 16 panes per screen, unlimited screens</li>
+          <li>Works on 3 of your Macs</li>
+          <li>CLI extras: smart-blank, display profiles, templates</li>
+          <li>Every 0.x update</li>
+        </ul>
+        <a class="btn btn-primary" style="margin-top:20px;width:100%;justify-content:center" href="https://checkout.dodopayments.com/buy/pdt_0No8294k2zu1ueeXAt9hJ?quantity=1">Buy Fleet Pro — $24</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Install</div>
+      <h2>Download the app, or add the plugins.</h2>
+      <p>First public build — unsigned for now (see below), everything else is real: real checkout, real license activation, real git worktrees.</p>
+    </div>
+    <div class="code">
+      <div><span class="c"># the app</span></div>
+      <div><span class="p">↓</span> <a href="https://github.com/hotgarlicprawns/fleet/releases/download/v0.3.0/Fleet-0.3.0.dmg" style="color:inherit">Fleet-0.3.0.dmg</a> <span class="c">— open it, drag Fleet to Applications, then "Turn on HUD" in the banner</span></div>
+      <div>&nbsp;</div>
+      <div><span class="c"># Claude Code plugins (fleet = the tiling/power/HUD toolkit; fleet-lean = free token-saving tools, no account)</span></div>
+      <div><span class="p">&gt;</span> /plugin marketplace add hotgarlicprawns/fleet</div>
+      <div><span class="p">&gt;</span> /plugin install fleet@fleet-marketplace</div>
+      <div><span class="p">&gt;</span> /plugin install fleet-lean@fleet-marketplace</div>
+      <div>&nbsp;</div>
+      <div><span class="c"># the tmux-based CLI (npm package publishing soon — for now, clone + link)</span></div>
+      <div><span class="p">$</span> git clone https://github.com/hotgarlicprawns/fleet && cd fleet && npm link</div>
+      <div><span class="p">$</span> brew install tmux &amp;&amp; fleet hud install &amp;&amp; fleet up</div>
+    </div>
+    <div class="gatekeeper">
+      <span class="mk">!</span>
+      <div><b>First open:</b> macOS will say Fleet is from an unidentified developer — expected for a fresh app before Apple notarization.
+      Right-click (Control-click) Fleet.app → <b>Open</b> → <b>Open</b> again in the dialog. Only needed once. Source is public:
+      <a href="https://github.com/hotgarlicprawns/fleet">github.com/hotgarlicprawns/fleet</a>.</div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span class="mono">fleet v0.3 · macOS 13+</span>
+    <span>Linux, WezTerm and a team spend dashboard are on the roadmap</span>
+  </div>
+</footer>
+
+</body></html>
