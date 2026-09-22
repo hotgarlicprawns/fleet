@@ -47,6 +47,18 @@ Claude Code plugin (auto power-management + attention flags per session):
 /plugin install fleet@fleet-marketplace
 ```
 
+## fleet-lean — cut token spend, no account needed
+
+A separate, free-forever, MIT plugin: two tools (`lean_search`, `lean_edit`) that fuse
+several built-in Claude Code tool calls into one, so routine search-and-edit work costs
+fewer round-trips and fewer tokens. Runs entirely as a local MCP server — no signup, no
+cloud, no dependency on the rest of fleet. See [plugin-lean/README.md](plugin-lean/README.md).
+
+```
+/plugin install fleet-lean@fleet-marketplace
+/fleet-lean-report      # after a session, see calls/tokens it saved
+```
+
 ## The HUD — cost & context per session
 
 `fleet hud install` adds a statusLine to `~/.claude/settings.json` that both

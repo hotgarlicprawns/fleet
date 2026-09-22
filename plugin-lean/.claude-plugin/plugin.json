@@ -1,0 +1,13 @@
+{
+  "name": "fleet-lean",
+  "version": "0.1.0",
+  "description": "Fused search + batch multi-file edit tools for Claude Code, cutting tool round-trips and token spend. No account, no cloud — runs entirely as a local process.",
+  "author": { "name": "bishesh" },
+  "commands": "./commands",
+  "mcpServers": {
+    "fleet-lean": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/index.js"]
+    }
+  }
+}

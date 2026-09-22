@@ -4,7 +4,7 @@ fleet is made of two parts with different licenses.
 
 ---
 
-## 1. The Claude Code plugin (`plugin/`) — MIT
+## 1. The Claude Code plugins (`plugin/`, `plugin-lean/`) — MIT
 
 Copyright (c) 2026 bishesh
 
