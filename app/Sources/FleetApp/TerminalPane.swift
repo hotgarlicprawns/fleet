@@ -27,6 +27,11 @@ struct TerminalPane: NSViewRepresentable {
         env.append("PATH=\(UserEnv.path)")
         env.append("SHELL=\(shell)")
         env.append("FLEET_PANE=\(pane.name)")
+        // Inherited by hud/statusline.sh and the fleet-lean MCP server (both
+        // spawned as children of this `claude` process), so they can key
+        // their own sidecars by the exact pane, not by directory/basename —
+        // see SessionStats.match's doc comment for why that used to be wrong.
+        env.append("FLEET_PANE_ID=\(pane.id.uuidString)")
         if !env.contains(where: { $0.hasPrefix("HOME=") }) {
             env.append("HOME=\(FileManager.default.homeDirectoryForCurrentUser.path)")
         }

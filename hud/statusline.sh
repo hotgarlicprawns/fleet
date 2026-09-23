@@ -61,17 +61,30 @@ fi
 realdir=$(cd "$dir" 2>/dev/null && pwd -P || printf '%s' "$dir")
 ci() { printf '%s' "${1:-0}" | awk '{printf "%d", $1+0}'; }
 cf() { printf '%s' "${1:-0}" | awk '{printf "%.4f", $1+0}'; }
+# For the JSON sidecar specifically: emit literal `null` for missing data
+# instead of 0. A brand-new session has no rate_limits yet (Claude Code
+# hasn't gotten a response with that data back), and the old `ci`/`cf`
+# (defaulting to 0) wrote a real "0" into the sidecar — indistinguishable
+# from "this account has genuinely used 0% of its rate limit." Fleet then
+# showed "5h 0% · 7d 0%" on a pane that had simply never reported yet, which
+# reads as wrong/stale data rather than "no data available."
+cin() { if [ -z "$1" ] || [ "$1" = "null" ]; then printf 'null'; else ci "$1"; fi; }
+cfn() { if [ -z "$1" ] || [ "$1" = "null" ]; then printf 'null'; else cf "$1"; fi; }
 
 cat > "$f" <<EOF
 {
   "sessionId": "$sid",
   "claudePid": ${PPID:-0},
+  "hudVersion": 2,
+  "fleetPaneId": "${FLEET_PANE_ID:-}",
+  "account": "${FLEET_ACCOUNT:-}",
+  "configDir": "${CLAUDE_CONFIG_DIR:-}",
   "dir": "$realdir",
   "model": "${model:-Claude}",
-  "costUsd": $(cf "$cost"),
-  "ctxPct": $(ci "$ctx"),
-  "rl5h": $(ci "$five"),
-  "rl7d": $(ci "$week"),
+  "costUsd": $(cfn "$cost"),
+  "ctxPct": $(cin "$ctx"),
+  "rl5h": $(cin "$five"),
+  "rl7d": $(cin "$week"),
   "linesAdded": $(ci "$added"),
   "linesRemoved": $(ci "$removed"),
   "attention": $att,

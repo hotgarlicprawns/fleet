@@ -13,6 +13,15 @@ struct SessionStat: Decodable {
     var attention: Bool?
     var state: String?
     var updated: Double?
+    // Added alongside the null-vs-zero fix and pane-id matching (see match's
+    // doc comment): a sidecar without these is from before this existed, and
+    // decodes fine with them all nil — hudVersion nil in particular is the
+    // signal that a sidecar predates real null-vs-0 handling.
+    var claudePid: Int?
+    var hudVersion: Int?
+    var fleetPaneId: String?
+    var account: String?
+    var configDir: String?
 }
 
 enum SessionStats {
@@ -40,17 +49,23 @@ enum SessionStats {
     }
 
     /// Best match for `path` out of an already-loaded snapshot (see `all()`).
-    static func match(_ stats: [SessionStat], path: String) -> SessionStat? {
-        let real = (try? FileManager.default.destinationOfSymbolicLink(atPath: path)) ?? path
-        let base = (path as NSString).lastPathComponent
+    /// Matches a sidecar to a SPECIFIC pane by `fleetPaneId` — set by
+    /// TerminalPane via the FLEET_PANE_ID env var, and written into the
+    /// sidecar by hud/statusline.sh. This used to match by the pane's
+    /// working directory instead (exact path, its symlink target, or just
+    /// the last path component) — meaning two panes in the SAME directory
+    /// always showed identical numbers (whichever session most recently
+    /// wrote to that dir), a brand-new pane could show a stale reading from
+    /// a session that ran there hours ago (inside Fleet or not), and any
+    /// two unrelated directories sharing a basename anywhere on disk could
+    /// collide. A pane with no sidecar of its own now shows nothing (nil),
+    /// never another pane's borrowed numbers.
+    static func match(_ stats: [SessionStat], paneID: UUID) -> SessionStat? {
+        let idStr = paneID.uuidString
         return stats
-            .filter { $0.dir == path || $0.dir == real || ($0.dir as NSString).lastPathComponent == base }
+            .filter { $0.fleetPaneId == idStr }
             .max { ($0.updated ?? 0) < ($1.updated ?? 0) }
     }
-
-    /// Convenience for one-off lookups outside a poll loop. Do not use this
-    /// in a per-pane loop — see `all()`.
-    static func forPath(_ path: String) -> SessionStat? { match(all(), path: path) }
 
     static func totalCostToday(_ stats: [SessionStat]? = nil) -> Double {
         let cutoff = Date().timeIntervalSince1970 - 86_400

@@ -1,11 +1,18 @@
 import SwiftUI
 import AppKit
 
-/// Debug log under ~/.config/fleet/ — not the home directory root. Cheap, and
+/// Debug log under $XDG_CONFIG_HOME/fleet (or ~/.config/fleet if unset) — same
+/// override every other config path in this app respects (CockpitStore,
+/// LicenseManager, SessionStats, HUDManager). This one was hardcoded to the
+/// real home directory, which meant a test run isolated via XDG_CONFIG_HOME
+/// still wrote its debug log into the real ~/.config/fleet — harmless on its
+/// own, but a sign the isolation wasn't actually complete. Cheap, and
 /// harmless to leave in for a v0.1: only ever written to, never read by the UI.
 func flog(_ s: String) {
     let line = "[\(Date())] \(s)\n"
-    let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/fleet")
+    let base = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"].map(URL.init(fileURLWithPath:))
+        ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config")
+    let dir = base.appendingPathComponent("fleet")
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     let url = dir.appendingPathComponent("app-debug.log")
     if let h = try? FileHandle(forWritingTo: url) {
@@ -38,8 +45,13 @@ struct FleetApp: App {
                 Button("Add Pane") {
                     if let s = store.activeScreen { store.setPaneCount(s.panes.count + 1, in: s.id) }
                 }.keyboardShortcut("t", modifiers: [.command])
-                Button("Remove Pane") {
-                    if let s = store.activeScreen { store.setPaneCount(s.panes.count - 1, in: s.id) }
+                Button("Remove Last Pane") {
+                    // TODO once focused-pane tracking exists (see PaneCell's
+                    // per-pane × for the general case): this should close
+                    // whichever pane has keyboard focus, not always the last
+                    // one. Routed through closePane (not setPaneCount) so it
+                    // gets the same maximizedPane/statByPane cleanup.
+                    if let s = store.activeScreen, let last = s.panes.last { store.closePane(last.id, in: s.id) }
                 }.keyboardShortcut("w", modifiers: [.command, .shift])
             }
         }
@@ -130,7 +142,7 @@ private struct MenuBarContent: View {
         Divider()
         ForEach(store.screens) { s in
             Button((s.id == store.activeScreenID ? "● " : "   ") + s.name + (store.waitingCount(s) > 0 ? "  · waiting" : "")) {
-                store.activeScreenID = s.id; Hotkey.summon()
+                store.select(s.id); Hotkey.summon()
             }
         }
         Divider()

@@ -1,15 +1,28 @@
 #!/bin/bash
 # fleet Fleet.app — hard-test suite.
 # Runs the scenarios from TESTING.md end to end and prints PASS/FAIL/SKIP.
-# Safe to re-run: it backs up and restores your real ~/.config/fleet/app.json,
-# and only ever kills processes it can prove are its own test app/children —
+#
+# Runs in its OWN config directory and its OWN app instance (open -n --env),
+# exactly like soak-test.sh — it NEVER reads or writes your real
+# ~/.config/fleet. An earlier version backed up and restored app.json in
+# place instead, and a killed/interrupted run once left a leftover test
+# fixture (screen "s", three permanently-sleeping panes) sitting in a real
+# ~/.config/fleet/app.json — a screen that looks exactly like a "dead,
+# unwritable" bug report. This isolation is what prevents that class of
+# problem entirely, not just recovers from it after the fact.
+#
+# Only ever kills processes it can prove are its own test app/children —
 # never a blanket `pkill claude` that could hit an unrelated real session.
 set -uo pipefail
 cd "$(dirname "$0")"
 
-CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fleet"
+TESTROOT=$(mktemp -d /tmp/fleet-hardtest-cfg.XXXXXX)
+export XDG_CONFIG_HOME="$TESTROOT"   # inherited by any `node ...` calls below directly;
+                                      # `open` does NOT forward shell env to GUI apps, so
+                                      # launch() below passes it explicitly via --env too.
+CFG_DIR="$TESTROOT/fleet"
 APPJSON="$CFG_DIR/app.json"
-BACKUP="$APPJSON.hardtest-bak"
+mkdir -p "$CFG_DIR"
 PASS=0; FAIL=0; SKIP=0
 
 pass() { echo "  PASS  $1"; PASS=$((PASS+1)); }
@@ -31,26 +44,19 @@ kill_app_tree() {
 launch() {
   # a leftover instance would make `open` merely re-activate it (with the OLD config)
   if [ -n "$(app_pid)" ]; then echo "     (note: stray Fleet instance found before launch — killed)"; kill_app_tree; fi
-  open Fleet.app; sleep "${1:-3}"
+  open -n --env XDG_CONFIG_HOME="$TESTROOT" Fleet.app; sleep "${1:-3}"
 }
 
-[ -f "$APPJSON" ] && cp "$APPJSON" "$BACKUP"
-LICBAK="$CFG_DIR/.hardtest-lic"
-rm -rf "$LICBAK"; mkdir -p "$LICBAK"
-for f in trial.json license.json owner; do [ -e "$CFG_DIR/$f" ] && cp -p "$CFG_DIR/$f" "$LICBAK/$f"; done
 # every section except 7c runs as an entitled owner; 7c manages entitlement itself
 touch "$CFG_DIR/owner"
 cleanup() {
   kill_app_tree
-  [ -f "$BACKUP" ] && mv "$BACKUP" "$APPJSON"
-  for f in trial.json license.json owner; do
-    rm -f "$CFG_DIR/$f"; [ -e "$LICBAK/$f" ] && cp -p "$LICBAK/$f" "$CFG_DIR/$f"
-  done
-  rm -rf "$LICBAK"
+  rm -rf "$TESTROOT"
 }
 trap cleanup EXIT
 
 echo "=== fleet Fleet.app hard-test suite ==="
+echo "config: $CFG_DIR (isolated — your real ~/.config/fleet is never touched)"
 echo "log: $CFG_DIR/app-debug.log"
 
 # ---------------------------------------------------------------------------
@@ -154,6 +160,92 @@ if [ "${r1:-9999}" -gt 0 ] && [ "$growth" -lt 150 ] 2>/dev/null; then
 else
   fail "RSS grew ${growth}MB in 25s of continued output — scrollback buffer may be unbounded"
 fi
+
+# ---------------------------------------------------------------------------
+section "3c. grid identity — changing pane count must not kill OTHER panes' agents"
+# Regression for a real bug: ScreenGrid used to nest a VStack/HStack ForEach
+# keyed by ROW OFFSET, recomputed from pane count (columns = ceil(sqrt(n))).
+# Growing 4 panes to 5 changes the column count, which moves a pane from one
+# row to another — SwiftUI saw that as the pane leaving one HStack and
+# appearing in a different one, tore down its TerminalPane, and
+# dismantleNSView SIGHUP/SIGTERM'd that pane's whole process group. Adding a
+# pane could silently kill a DIFFERENT, untouched pane's agent.
+python3 - > "$APPJSON" <<'PYEOF'
+import json
+panes = [{"name": f"p{i}", "command": f"sleep 71{i}0; sleep 0", "cwd": "/tmp"} for i in range(4)]
+json.dump({"screens": [{"name": "grid", "panes": panes}], "power": "Display on"}, open('/dev/stdout', 'w'))
+PYEOF
+launch 6
+alive() { pgrep -f "sleep $1" >/dev/null 2>&1; }
+if alive 7100 && alive 7110 && alive 7120 && alive 7130; then
+  pass "4 panes running before the grid reflows"
+else
+  fail "setup: expected 4 sleep panes not all running"
+fi
+ctl() { printf '%s' "$1" > "$CFG_DIR/control.json"; sleep 3; }
+ctl '{"cmd":"setPaneCount","name":"grid","count":5}'
+sleep 2
+if alive 7100 && alive 7110 && alive 7120 && alive 7130; then
+  pass "growing 4 panes to 5 did not kill any of the original 4 (grid identity holds)"
+else
+  fail "REGRESSION: growing pane count killed one or more untouched panes"
+fi
+ctl '{"cmd":"setPaneCount","name":"grid","count":2}'
+sleep 2
+if alive 7100 && alive 7110; then
+  pass "shrinking to 2 kept the first 2 panes alive (grid identity holds on shrink too)"
+else
+  fail "REGRESSION: shrinking pane count killed a pane it should have kept"
+fi
+kill_app_tree
+pkill -f "sleep 71[0-3]0" 2>/dev/null; true
+
+# ---------------------------------------------------------------------------
+section "3d. per-pane close removes the CHOSEN pane, not always the last one"
+# Regression for the "minus button doesn't work" report: the only removal
+# path used to be setPaneCount, which always dropped whichever pane was
+# LAST — never the one you actually wanted gone.
+python3 - > "$APPJSON" <<'PYEOF'
+import json
+panes = [{"name": f"p{i}", "command": f"sleep 72{i}0; sleep 0", "cwd": "/tmp"} for i in range(3)]
+json.dump({"screens": [{"name": "closetest", "panes": panes}], "power": "Display on"}, open('/dev/stdout', 'w'))
+PYEOF
+launch 6
+alive() { pgrep -f "sleep $1" >/dev/null 2>&1; }
+if alive 7200 && alive 7210 && alive 7220; then pass "3 panes running before closing the middle one"; else fail "setup: expected 3 panes not all running"; fi
+ctl() { printf '%s' "$1" > "$CFG_DIR/control.json"; sleep 3; }
+ctl '{"cmd":"closePane","name":"closetest","pane":"p1"}'
+sleep 2
+if alive 7200 && alive 7220 && ! alive 7210; then
+  pass "closing pane p1 (the middle one) removed exactly that pane, kept p0 and p2"
+else
+  fail "closePane removed the wrong pane(s): p0=$(alive 7200 && echo alive || echo dead) p1=$(alive 7210 && echo alive || echo dead) p2=$(alive 7220 && echo alive || echo dead)"
+fi
+kill_app_tree
+pkill -f "sleep 72[0-2]0" 2>/dev/null; true
+
+# ---------------------------------------------------------------------------
+section "3e. closing down to zero screens actually sticks (no auto-recreate)"
+# Regression: closeScreen and load() used to both recreate a fresh default
+# "main" screen the instant screens became empty, so closing your last
+# screen never actually stuck — you'd always land back on a new one.
+python3 - > "$APPJSON" <<'PYEOF'
+import json
+json.dump({"screens": [{"name": "only", "panes": [{"name": "p0", "command": "sleep 900", "cwd": "/tmp"}]}],
+           "power": "Display on"}, open('/dev/stdout', 'w'))
+PYEOF
+launch 6
+ctl() { printf '%s' "$1" > "$CFG_DIR/control.json"; sleep 3; }
+ctl '{"cmd":"closeScreen","name":"only"}'
+sleep 2
+COUNT=$(python3 -c "import json; print(len(json.load(open('$APPJSON'))['screens']))" 2>/dev/null)
+if [ "$COUNT" = "0" ]; then
+  pass "closing the only screen leaves zero screens persisted (no auto-recreated default)"
+else
+  fail "expected 0 screens persisted after closing the last one, got: $COUNT"
+fi
+kill_app_tree
+pkill -f "sleep 900" 2>/dev/null; true
 
 # ---------------------------------------------------------------------------
 section "4. crash resilience (kill -9)"

@@ -63,13 +63,30 @@ struct DisplayInfo: Identifiable, Hashable {
 @MainActor
 final class CockpitStore: ObservableObject {
     @Published var screens: [Screen] = []
-    @Published var activeScreenID: UUID?
+    @Published var activeScreenID: UUID? {
+        // Defensive fallback: if something ever assigns an id that isn't in
+        // `screens`, fall back instead of leaving every ScreenGrid hidden and
+        // non-interactive at once (see the ZStack in CockpitView — visibility
+        // and hit-testing both key off `screen.id == activeScreenID`, so an
+        // unmatched id makes every screen invisible AND unclickable
+        // simultaneously, which looks exactly like a dead, unwritable app).
+        // `load()` and `closeScreen` already guard the known paths that could
+        // produce this; this is a last-resort net for any path that doesn't.
+        didSet {
+            if let id = activeScreenID, !screens.contains(where: { $0.id == id }) {
+                activeScreenID = screens.first?.id
+            }
+        }
+    }
     @Published var statByPane: [UUID: SessionStat] = [:]
     @Published var powerMode: PowerManager.Mode = .displayOn { didSet { power.apply(powerMode); persist() } }
     @Published var displays: [DisplayInfo] = []
     @Published var pinnedDisplay: CGDirectDisplayID? { didSet { moveWindow(); persist() } }
     @Published var totalToday: Double = 0
     @Published var focusRequest: UUID?
+    /// screen id -> the pane maximized within it, if any. Transient (not
+    /// persisted) — a fresh launch always starts with the normal grid.
+    @Published var maximizedPane: [UUID: UUID] = [:]
     @Published var gitLog: [UUID: String] = [:]      // screenID -> last git action output
     @Published var gitBusy: Set<UUID> = []
     @Published var hudInstalled: Bool = HUDManager.isInstalled
@@ -101,6 +118,7 @@ final class CockpitStore: ObservableObject {
         load()
         power.apply(powerMode)
         refreshDisplays()
+        if HUDManager.upgradeIfStale() { flog("HUD script upgraded to the bundled version") }
         poll()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
@@ -131,15 +149,25 @@ final class CockpitStore: ObservableObject {
     }
 
     func load() {
+        var hadExplicitScreensKey = false
         if let data = try? Data(contentsOf: appConfigURL),
            let cfg = try? JSONDecoder().decode(AppConfig.self, from: data) {
-            if let s = cfg.screens, !s.isEmpty { screens = s }
+            if let s = cfg.screens { screens = s; hadExplicitScreensKey = true }
             else if let p = cfg.panes, !p.isEmpty { screens = [Screen(name: "main", panes: p)] }
             if let p = cfg.power, let m = PowerManager.Mode(rawValue: p) { powerMode = m }
             if let d = cfg.displayID { pinnedDisplay = d }
             activeScreenID = cfg.activeScreenID
         }
-        if screens.isEmpty { screens = [Screen(name: "main", panes: defaultPanesFromFleetConfig())] }
+        // Only seed a default screen when there was truly nothing configured
+        // — no app.json at all, or one with neither `screens` nor `panes` —
+        // never when the saved config explicitly says `screens: []`, which
+        // means the user deliberately closed every screen. The previous
+        // version treated those the same, so closing your last screen never
+        // actually stuck: reopening Fleet (or this same load() running
+        // again) silently recreated a fresh "main" screen every time.
+        if screens.isEmpty && !hadExplicitScreensKey {
+            screens = [Screen(name: "main", panes: defaultPanesFromFleetConfig())]
+        }
         screens = screens.map { s in
             var s = s
             s.panes = s.panes.map { var q = $0; q.cwd = homeExpand(q.cwd); return q }
@@ -209,8 +237,7 @@ final class CockpitStore: ObservableObject {
         let screen = Screen(name: name, repoPath: repoPath, worktreePath: worktreePath,
                              branch: resolvedBranch, baseBranch: baseBranch, panes: panes)
         screens.append(screen)
-        activeScreenID = screen.id
-        persist()
+        select(screen.id) // also moves focus into the new screen's first pane, and persists
         return screen
     }
 
@@ -218,7 +245,11 @@ final class CockpitStore: ObservableObject {
         guard let s = screens.first(where: { $0.id == id }) else { return }
         screens.removeAll { $0.id == id }
         if activeScreenID == id { activeScreenID = screens.first?.id }
-        if screens.isEmpty { screens = [Screen(name: "main", panes: defaultPanesFromFleetConfig())]; activeScreenID = screens.first?.id }
+        // Closing down to zero screens is now a legitimate end state — the
+        // real empty-state view in CockpitView handles it. This used to
+        // immediately recreate a fresh default screen, which is why closing
+        // your last screen never actually stuck (you'd always land back on a
+        // new "main" screen instead of the empty state).
         persist()
         guard removeWorktree, let repo = s.repoPath, let wt = s.worktreePath else { return }
         // Removing the screen tears its terminals down (agents get SIGTERM, then
@@ -258,13 +289,37 @@ final class CockpitStore: ObservableObject {
         }
         var panes = screens[i].panes
         if n > panes.count {
-            let cwd = panes.last?.cwd ?? screens[i].worktreePath ?? FileManager.default.homeDirectoryForCurrentUser.path
-            let cmd = panes.last?.command ?? "claude"
+            // The screen's own baseline, from its FIRST pane — not its last.
+            // A screen's later panes can end up with an unusual one-off
+            // command (a test fixture, a manual override); using `.last`
+            // meant that command would keep spreading to every pane added
+            // after it, rather than the screen's actual intended agent.
+            let cwd = panes.first?.cwd ?? screens[i].worktreePath ?? FileManager.default.homeDirectoryForCurrentUser.path
+            let cmd = panes.first?.command ?? "claude"
             panes += (panes.count..<n).map { PaneConfig(name: "pane \($0)", command: cmd, cwd: cwd) }
         } else if n < panes.count {
+            let removed = panes.suffix(panes.count - n)
             panes.removeLast(panes.count - n)
+            for p in removed {
+                statByPane[p.id] = nil
+                if maximizedPane[screenID] == p.id { maximizedPane[screenID] = nil }
+            }
         }
         screens[i].panes = panes
+        persist()
+    }
+
+    /// Removes exactly the pane the caller specifies, killing its agent —
+    /// unlike setPaneCount/MiniStepper, which only ever removed whichever
+    /// pane happened to be LAST, not the one you were looking at. That was
+    /// the actual bug behind "the minus button doesn't work": it worked, it
+    /// just never closed the pane you wanted. A screen may end up with zero
+    /// panes; ScreenGrid shows an "+ add pane" empty state for that screen.
+    func closePane(_ id: UUID, in screenID: UUID) {
+        guard let i = screens.firstIndex(where: { $0.id == screenID }) else { return }
+        screens[i].panes.removeAll { $0.id == id }
+        if maximizedPane[screenID] == id { maximizedPane[screenID] = nil }
+        statByPane[id] = nil
         persist()
     }
 
@@ -275,6 +330,24 @@ final class CockpitStore: ObservableObject {
         persist()
     }
 
+    /// Switches the active screen AND moves keyboard focus into it — the one
+    /// path every screen switch should go through. A plain `activeScreenID =`
+    /// assignment (the previous pattern, used at several call sites) changes
+    /// which ScreenGrid is visible/hit-testable but never moves AppKit's
+    /// first responder away from the previous screen's terminal, which stays
+    /// mounted at opacity 0 (not torn down, so its agent keeps running).
+    /// Keystrokes kept going to that now-invisible terminal — the screen you
+    /// were looking at took no input at all, which reads exactly like a dead,
+    /// unwritable app. Also persists the selection immediately; a plain
+    /// assignment was never saved, so relaunching Fleet could restore an old
+    /// screen instead of the one you'd switched to.
+    func select(_ screenID: UUID) {
+        guard let s = screens.first(where: { $0.id == screenID }) else { return }
+        activeScreenID = screenID
+        persist()
+        focusRequest = s.panes.first(where: { !isLocked($0.id) })?.id
+    }
+
     func jumpToWaiting() {
         // first look in the active screen, then any other screen (switching to it)
         if let s = activeScreen, let id = s.panes.first(where: { statByPane[$0.id]?.attention == true })?.id {
@@ -283,6 +356,7 @@ final class CockpitStore: ObservableObject {
         for s in screens where s.id != activeScreenID {
             if let id = s.panes.first(where: { statByPane[$0.id]?.attention == true })?.id {
                 activeScreenID = s.id
+                persist() // switching screens must always persist — see select()'s doc comment
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.focusRequest = id }
                 return
             }
@@ -412,7 +486,10 @@ final class CockpitStore: ObservableObject {
         flog("control: \(cmd) \(name ?? "")")
         switch cmd {
         case "closeScreen": if let s = screen { closeScreen(s.id, removeWorktree: o["removeWorktree"] as? Bool ?? false) }
-        case "select": if let s = screen { activeScreenID = s.id }
+        case "closePane":
+            if let s = screen, let paneName = o["pane"] as? String,
+               let p = s.panes.first(where: { $0.name == paneName }) { closePane(p.id, in: s.id) }
+        case "select": if let s = screen { select(s.id) }
         case "performClose": NSApp.windows.first(where: { $0.title == "fleet" })?.performClose(nil)
         case "summon": Hotkey.summon()
         case "showUpgrade": upgradeReason = o["reason"] as? String ?? ""; showUpgrade = true
@@ -471,7 +548,7 @@ final class CockpitStore: ObservableObject {
     private var pollCount = 0
 
     private func poll() {
-        let paneCwds: [(UUID, String)] = screens.flatMap { s in s.panes.map { ($0.id, $0.cwd) } }
+        let paneIDs: [UUID] = screens.flatMap { s in s.panes.map { $0.id } }
         pollCount += 1
         refreshEntitlement()
         let prune = pollCount % 100 == 0   // roughly every ~5 minutes at a 3s interval
@@ -482,7 +559,7 @@ final class CockpitStore: ObservableObject {
             let cutoff = Date().timeIntervalSince1970 - 8 * 3600
             let recent = day.filter { ($0.updated ?? 0) > cutoff }
             var map: [UUID: SessionStat] = [:]
-            for (id, cwd) in paneCwds { if let s = SessionStats.match(recent, path: cwd) { map[id] = s } }
+            for id in paneIDs { if let s = SessionStats.match(recent, paneID: id) { map[id] = s } }
             let total = SessionStats.totalCostToday(day)
             if prune { SessionStats.pruneOlderThan(days: 30) }
             await MainActor.run {

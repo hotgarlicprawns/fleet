@@ -24,8 +24,7 @@ struct CockpitView: View {
                             .zIndex(screen.id == store.activeScreenID ? 1 : 0)
                     }
                     if store.screens.isEmpty {
-                        Text("no screens yet — press + in the sidebar")
-                            .foregroundStyle(Theme.inkFaint).font(Theme.mono(13))
+                        EmptyScreensCTA(showingNewScreen: $showingNewScreen)
                     }
                 }
             }
@@ -43,6 +42,17 @@ struct CockpitView: View {
         .sheet(isPresented: $showingNewScreen) { NewScreenSheet(isPresented: $showingNewScreen) }
         .sheet(isPresented: $store.showUpgrade) { UpgradeSheet() }
         .sheet(isPresented: $store.showReport) { ReportSheet() }
+        .task {
+            // Nothing sets keyboard focus at launch otherwise — TerminalPane
+            // only calls makeFirstResponder when focusRequest matches its own
+            // pane id, and nothing did that on startup. The active screen
+            // rendered correctly but silently took no keystrokes at all,
+            // which reads exactly like a dead app. The short delay gives
+            // AppDelegate.ensureWindow time to actually make the window key
+            // first (makeFirstResponder is a no-op on a window that isn't).
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if let id = store.activeScreenID { store.select(id) }
+        }
     }
 
     @ViewBuilder private var planBanner: some View {
@@ -88,7 +98,16 @@ struct CockpitView: View {
                 Text(s.name).font(Theme.mono(12.5, .semibold)).foregroundStyle(Theme.ink)
                     .lineLimit(1).truncationMode(.tail).frame(maxWidth: 160, alignment: .leading)
                 if s.isGitBacked { gitMenu(s) }
-                MiniStepper(value: Binding(get: { s.panes.count }, set: { store.setPaneCount($0, in: s.id) }))
+                // A stepper here doubled up with per-pane × buttons in each
+                // header (its minus always removed whichever pane happened
+                // to be LAST, not one you chose) and crowded the toolbar.
+                // "+ pane" only adds; removing a specific pane is now that
+                // pane's own × button.
+                Button { store.setPaneCount(s.panes.count + 1, in: s.id) } label: {
+                    Image(systemName: "plus.square").font(.system(size: 12))
+                }
+                .buttonStyle(.plain).foregroundStyle(Theme.inkSoft)
+                .help("Add a pane (⌘T)")
             } else {
                 Text("fleet").font(Theme.mono(12.5, .semibold)).foregroundStyle(Theme.inkFaint).fixedSize()
             }
@@ -354,46 +373,128 @@ private struct ScreenRow: View {
             Spacer()
             if waiting > 0 { Circle().fill(Theme.accent).frame(width: 6, height: 6) }
             if cost > 0 { Text(String(format: "$%.2f", cost)).font(Theme.mono(10)).foregroundStyle(Theme.inkFaint) }
-            if hover && store.screens.count > 1 {
+            // Previously hidden unless store.screens.count > 1 — meant the
+            // close button silently vanished with no explanation once you
+            // were down to one screen, which read as "the close button
+            // doesn't work." A real empty-state view already exists (see
+            // CockpitView's ZStack) for zero screens, so there's no longer a
+            // reason to prevent closing down to it.
+            if hover || isActive {
                 Button { confirmClose() } label: { Image(systemName: "xmark") }
                     .buttonStyle(.plain).font(.system(size: 9)).foregroundStyle(Theme.inkFaint)
+                    .help("Close “\(screen.name)”")
             }
         }
         .padding(.horizontal, 8).padding(.vertical, 6)
         .background(isActive ? Theme.accent.opacity(0.14) : (hover ? Theme.panel2 : .clear))
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
-        .onTapGesture { store.activeScreenID = screen.id }
+        .onTapGesture { store.select(screen.id) }
         .onTapGesture(count: 2) { draft = screen.name; editing = true }
         .onHover { hover = $0 }
         .padding(.leading, showProject ? 0 : 12)
+        .contextMenu {
+            Button("Rename") { draft = screen.name; editing = true }
+            Button("Close…") { confirmClose() }
+        }
     }
 }
 
 // MARK: - Terminal grid (one per screen, always mounted)
 
+/// Arranges panes in the same √n-column grid as before, but as ONE flat
+/// Layout instead of nested VStack/HStack ForEachs keyed by row index.
+///
+/// The nested version keyed its outer ForEach by row *offset*: when the pane
+/// count changed, the column count changed too (columns = ceil(√n)), which
+/// moved panes between rows — e.g. adding a 5th pane to 4 (2 cols) makes 3
+/// cols, so pane C moves from row 1 to row 0. SwiftUI saw that as the pane
+/// leaving one HStack and appearing in a different one, tore down its
+/// TerminalPane (an NSViewRepresentable) as a result, and dismantleNSView
+/// SIGHUP/SIGTERM'd that pane's whole process group — silently killing a
+/// *different*, untouched pane's agent just because someone else's pane
+/// count changed. A `Layout` container's subviews come from a single flat
+/// ForEach with stable identity; only their position/size changes when the
+/// grid reflows, never their identity, so this can't happen here.
+private struct PaneGridLayout: Layout {
+    static let gap: CGFloat = 1
+
+    private static func grid(for count: Int) -> (columns: Int, rows: Int) {
+        let columns = max(1, Int(ceil(sqrt(Double(count)))))
+        let rows = count > 0 ? Int(ceil(Double(count) / Double(columns))) : 0
+        return (columns, rows)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        proposal.replacingUnspecifiedDimensions()
+    }
+
+    /// When set, every subview is proposed the FULL bounds — the maximized
+    /// one renders there; the others stay mounted (never unmounted, so their
+    /// agents keep running) but are made invisible/non-interactive by
+    /// PaneCell's own opacity/allowsHitTesting, the same pattern the
+    /// screens-switching ZStack already uses. Their exact placed frame
+    /// doesn't matter once hidden that way, so giving everyone the same
+    /// frame avoids needing a way to identify "which subview is which pane"
+    /// inside a Layout (no LayoutValueKey needed).
+    var isAnyMaximized: Bool = false
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let n = subviews.count
+        guard n > 0 else { return }
+        if isAnyMaximized {
+            for subview in subviews {
+                subview.place(at: CGPoint(x: bounds.midX, y: bounds.midY), anchor: .center,
+                               proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
+            }
+            return
+        }
+        let (columns, rows) = Self.grid(for: n)
+        let cellW = (bounds.width - Self.gap * CGFloat(columns - 1)) / CGFloat(columns)
+        let cellH = (bounds.height - Self.gap * CGFloat(rows - 1)) / CGFloat(rows)
+        for (index, subview) in subviews.enumerated() {
+            let r = index / columns, c = index % columns
+            let x = bounds.minX + CGFloat(c) * (cellW + Self.gap) + cellW / 2
+            let y = bounds.minY + CGFloat(r) * (cellH + Self.gap) + cellH / 2
+            subview.place(at: CGPoint(x: x, y: y), anchor: .center,
+                           proposal: ProposedViewSize(width: cellW, height: cellH))
+        }
+    }
+}
+
+/// Shown when there are zero screens — a real reachable state now that
+/// closing your last screen doesn't immediately recreate a default one.
+private struct EmptyScreensCTA: View {
+    @EnvironmentObject var store: CockpitStore
+    @Binding var showingNewScreen: Bool
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("no screens yet").foregroundStyle(Theme.inkFaint).font(Theme.mono(13))
+            HStack(spacing: 10) {
+                FleetButton(title: "New Screen", systemImage: "plus", primary: true) { showingNewScreen = true }
+                FleetButton(title: "Quick Claude", systemImage: "terminal") { _ = store.quickSpin(agent: "claude", repoPath: nil) }
+                FleetButton(title: "Quick Codex", systemImage: "terminal") { _ = store.quickSpin(agent: "codex", repoPath: nil) }
+            }
+        }
+    }
+}
+
 private struct ScreenGrid: View {
     @EnvironmentObject var store: CockpitStore
     let screen: Screen
 
-    private var columns: Int { max(1, Int(ceil(sqrt(Double(screen.panes.count))))) }
-    private var rows: [[PaneConfig]] {
-        stride(from: 0, to: screen.panes.count, by: columns).map {
-            Array(screen.panes[$0 ..< min($0 + columns, screen.panes.count)])
-        }
-    }
-
     var body: some View {
-        GeometryReader { _ in
-            VStack(spacing: 1) {
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                    HStack(spacing: 1) {
-                        ForEach(row) { pane in PaneCell(pane: pane, screenID: screen.id) }
-                    }
-                }
-            }
-            .background(Theme.ground)
+        PaneGridLayout(isAnyMaximized: store.maximizedPane[screen.id] != nil) {
+            ForEach(screen.panes) { pane in PaneCell(pane: pane, screenID: screen.id) }
         }
+        // Layout containers size to their content by default (like the old
+        // GeometryReader-less VStack would have) — GeometryReader was doing
+        // double duty as "take all available space," not just supplying a
+        // geometry value. Replicate that explicitly, or the grid shrink-wraps
+        // instead of filling the pane area.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.ground)
     }
 }
 
@@ -409,6 +510,25 @@ private struct PaneCell: View {
     @State private var resumeCommand: String? = nil
 
     private var stat: SessionStat? { store.statByPane[pane.id] }
+    private var isMaximized: Bool { store.maximizedPane[screenID] == pane.id }
+    private func toggleMaximize() {
+        store.maximizedPane[screenID] = isMaximized ? nil : pane.id
+        store.focusRequest = pane.id
+    }
+    private func confirmClosePane() {
+        // Only ask for confirmation when there's something to lose — a pane
+        // that's actively working or waiting on you. An idle/exited pane
+        // closes immediately, same as before there was any per-pane close.
+        if stat?.state == "working" || stat?.attention == true {
+            let a = NSAlert()
+            a.messageText = "Close “\(pane.name)”?"
+            a.informativeText = "Its agent is still running and will be stopped."
+            a.addButton(withTitle: "Close")
+            a.addButton(withTitle: "Cancel")
+            guard a.runModal() == .alertFirstButtonReturn else { return }
+        }
+        store.closePane(pane.id, in: screenID)
+    }
 
     var body: some View {
         // VStack, not an overlay ZStack: the header takes its own row and the
@@ -430,6 +550,16 @@ private struct PaneCell: View {
         .clipped()
         .overlay(Rectangle().stroke(stat?.attention == true ? Theme.accent : Theme.line,
                                      lineWidth: stat?.attention == true ? 2 : 1))
+        // When a DIFFERENT pane in this screen is maximized, stay mounted
+        // (agent keeps running) but go invisible/non-interactive — the same
+        // pattern the screens ZStack uses for background screens.
+        .opacity(hiddenByMaximize ? 0 : 1)
+        .allowsHitTesting(!hiddenByMaximize)
+        .zIndex(isMaximized ? 1 : 0)
+    }
+    private var hiddenByMaximize: Bool {
+        if let m = store.maximizedPane[screenID] { return m != pane.id }
+        return false
     }
 
     private var lockedPane: some View {
@@ -483,6 +613,14 @@ private struct PaneCell: View {
                 }
                 Spacer()
                 if let m = stat?.model { Text(m).font(Theme.mono(10)).foregroundStyle(Theme.inkFaint) }
+                Button { toggleMaximize() } label: {
+                    Image(systemName: isMaximized ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                }
+                .buttonStyle(.plain).font(.system(size: 9)).foregroundStyle(Theme.inkFaint)
+                .help(isMaximized ? "Restore" : "Maximize this pane")
+                Button { confirmClosePane() } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.plain).font(.system(size: 9)).foregroundStyle(Theme.inkFaint)
+                    .help("Close this pane")
             }
             if let s = stat, (s.costUsd ?? 0) > 0 || (s.ctxPct ?? 0) > 0 || s.rl5h != nil {
                 HStack(spacing: 12) {
