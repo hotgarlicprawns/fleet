@@ -1,6 +1,6 @@
 <!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1"><style>:root{color-scheme:light}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
 <title>fleet — every agent, one screen</title>
-<meta name="description" content="A native Mac cockpit for Claude Code and Codex: a screen per task with its own git worktree, cost and context on every pane, account-wide rate limits in the top bar, and a Mac that stays awake.">
+<meta name="description" content="A native Mac cockpit for Claude Code and Codex: a screen per task with its own git worktree, cost and context on every pane, rate limits for each of your Claude and Codex accounts in the top bar, and a Mac that stays awake.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
@@ -294,12 +294,12 @@
         <h1>Every session,<br><span class="accent">one screen.</span></h1>
         <p class="lede">
           A native Mac cockpit for Claude Code and Codex. A screen per task, each on
-          its own git worktree; cost and context on every pane, rate limits and
-          real token savings in the top bar; and a Mac that stays awake without
-          touching your monitor layout.
+          its own git worktree; cost and context on every pane; several Claude and
+          Codex accounts side by side, with each one's rate limits in the top bar;
+          and a Mac that stays awake without touching your monitor layout.
         </p>
         <div class="cta-row">
-          <a class="btn btn-primary" href="https://github.com/hotgarlicprawns/fleet/releases/download/v0.3.0/Fleet-0.3.0.dmg">Download Fleet.app</a>
+          <a class="btn btn-primary" href="https://github.com/hotgarlicprawns/fleet/releases/download/v0.4.0/Fleet-0.4.0.dmg">Download Fleet.app</a>
           <a class="btn btn-ghost" href="#screens">How screens work</a>
         </div>
         <div class="install-hint">macOS 13+ · 1.8MB · or <b>$</b> /plugin marketplace add hotgarlicprawns/fleet</div>
@@ -412,7 +412,7 @@
         <p>The spend report groups the last 24 hours and 7 days by project — “api $8.40 · web $3.10.” The toolbar total always matches it.</p>
       </div>
     </div>
-    <p class="note"><b class="mono" style="color:var(--accent-ink)">New, free, no account:</b> <span class="mono">fleet-lean</span> is a separate plugin — two tools that fuse search and multi-file edits into fewer, cheaper calls. <a href="#install">Install below.</a></p>
+    <p class="note"><b class="mono" style="color:var(--accent-ink)">New:</b> bring every subscription. Add a second Claude or Codex login in Settings → Accounts, pick an account per pane, and see 5h/7d limits for each one.</p>
   </div>
 </section>
 
@@ -456,7 +456,7 @@
           <li>Cost, context and rate-limit HUD</li>
           <li>Spend report, git-worktree screens</li>
           <li>Menu-bar item and <span class="mono">⌃⌥F</span> hotkey</li>
-          <li><span class="mono">fleet-lean</span> token-saving tools, free forever</li>
+          <li>Multiple Claude &amp; Codex accounts</li>
         </ul>
       </div>
       <div class="plan pro">
@@ -483,12 +483,11 @@
     </div>
     <div class="code">
       <div><span class="c"># the app</span></div>
-      <div><span class="p">↓</span> <a href="https://github.com/hotgarlicprawns/fleet/releases/download/v0.3.0/Fleet-0.3.0.dmg" style="color:inherit">Fleet-0.3.0.dmg</a> <span class="c">— open it, drag Fleet to Applications, then "Turn on HUD" in the banner</span></div>
+      <div><span class="p">↓</span> <a href="https://github.com/hotgarlicprawns/fleet/releases/download/v0.4.0/Fleet-0.4.0.dmg" style="color:inherit">Fleet-0.4.0.dmg</a> <span class="c">— open it, drag Fleet to Applications, then "Turn on HUD" in the banner</span></div>
       <div>&nbsp;</div>
-      <div><span class="c"># Claude Code plugins (fleet = the tiling/power/HUD toolkit; fleet-lean = free token-saving tools, no account)</span></div>
+      <div><span class="c"># optional Claude Code plugin (the tiling/power/HUD toolkit for tmux users)</span></div>
       <div><span class="p">&gt;</span> /plugin marketplace add hotgarlicprawns/fleet</div>
       <div><span class="p">&gt;</span> /plugin install fleet@fleet-marketplace</div>
-      <div><span class="p">&gt;</span> /plugin install fleet-lean@fleet-marketplace</div>
       <div>&nbsp;</div>
       <div><span class="c"># the tmux-based CLI (npm package publishing soon — for now, clone + link)</span></div>
       <div><span class="p">$</span> git clone https://github.com/hotgarlicprawns/fleet && cd fleet && npm link</div>

@@ -1,6 +1,24 @@
 import SwiftUI
 import AppKit
 
+/// One Claude Code or Codex login. Each extra account is just its own
+/// config directory: Claude Code keys its login (Keychain entry, settings,
+/// history) by CLAUDE_CONFIG_DIR, and Codex by CODEX_HOME — the officially
+/// supported way to run several subscriptions side by side. "No account"
+/// (accountID == nil) means your normal ~/.claude / ~/.codex login.
+struct Account: Identifiable, Codable, Equatable, Hashable {
+    enum Kind: String, Codable, CaseIterable { case claude, codex }
+    var id = UUID()
+    var name: String
+    var kind: Kind
+    var configDir: String
+
+    /// The env vars a pane on this account launches with.
+    var environment: [String] {
+        [(kind == .claude ? "CLAUDE_CONFIG_DIR=" : "CODEX_HOME=") + configDir, "FLEET_ACCOUNT=\(name)"]
+    }
+}
+
 struct PaneConfig: Identifiable, Codable, Equatable {
     var id = UUID()
     var name: String
@@ -12,11 +30,17 @@ struct PaneConfig: Identifiable, Codable, Equatable {
     /// off permanently for that pane — auto-naming never fights a name you
     /// chose yourself.
     var autoNamed: Bool = true
+    /// nil = the default login. Changing it restarts the pane (a running
+    /// process can't switch accounts), see PaneCell's `.id`.
+    var accountID: UUID? = nil
 
-    enum CodingKeys: String, CodingKey { case id, name, command, cwd, autoNamed }
+    /// Codex panes take Codex accounts; everything else is treated as Claude Code.
+    var agentKind: Account.Kind { command.trimmingCharacters(in: .whitespaces).hasPrefix("codex") ? .codex : .claude }
 
-    init(name: String, command: String, cwd: String) {
-        self.name = name; self.command = command; self.cwd = cwd
+    enum CodingKeys: String, CodingKey { case id, name, command, cwd, autoNamed, accountID }
+
+    init(name: String, command: String, cwd: String, accountID: UUID? = nil) {
+        self.name = name; self.command = command; self.cwd = cwd; self.accountID = accountID
         // A default-shaped name ("pane 0", "claude 2", …) is still fair
         // game for auto-naming; anything else was presumably already
         // chosen deliberately (e.g. a saved config from before this
@@ -30,6 +54,7 @@ struct PaneConfig: Identifiable, Codable, Equatable {
         command = (try? c.decode(String.self, forKey: .command)) ?? "claude"
         cwd = (try? c.decode(String.self, forKey: .cwd)) ?? FileManager.default.homeDirectoryForCurrentUser.path
         autoNamed = (try? c.decode(Bool.self, forKey: .autoNamed)) ?? PaneConfig.looksDefaultNamed(name)
+        accountID = try? c.decode(UUID.self, forKey: .accountID)
     }
 
     static func looksDefaultNamed(_ name: String) -> Bool {
@@ -79,6 +104,7 @@ struct DisplayInfo: Identifiable, Hashable {
 @MainActor
 final class CockpitStore: ObservableObject {
     @Published var screens: [Screen] = []
+    @Published var accounts: [Account] = []
     @Published var activeScreenID: UUID? {
         // Defensive fallback: if something ever assigns an id that isn't in
         // `screens`, fall back instead of leaving every ScreenGrid hidden and
@@ -161,6 +187,7 @@ final class CockpitStore: ObservableObject {
         var power: String?
         var displayID: UInt32?
         var activeScreenID: UUID?
+        var accounts: [Account]?
     }
 
     private func homeExpand(_ p: String) -> String {
@@ -176,6 +203,7 @@ final class CockpitStore: ObservableObject {
             if let p = cfg.power, let m = PowerManager.Mode(rawValue: p) { powerMode = m }
             if let d = cfg.displayID { pinnedDisplay = d }
             activeScreenID = cfg.activeScreenID
+            accounts = cfg.accounts ?? []
         }
         // Only seed a default screen when there was truly nothing configured
         // — no app.json at all, or one with neither `screens` nor `panes` —
@@ -218,7 +246,7 @@ final class CockpitStore: ObservableObject {
 
     func persist() {
         let cfg = AppConfig(screens: screens, panes: nil, power: powerMode.rawValue,
-                             displayID: pinnedDisplay, activeScreenID: activeScreenID)
+                             displayID: pinnedDisplay, activeScreenID: activeScreenID, accounts: accounts)
         try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
         if let data = try? JSONEncoder().encode(cfg) { try? data.write(to: appConfigURL) }
     }
@@ -230,7 +258,7 @@ final class CockpitStore: ObservableObject {
     /// checkout so this screen's agents never collide with another screen's.
     @discardableResult
     func addScreen(name: String, repoPath: String?, branch: String?, baseBranch: String,
-                   paneCount: Int, command: String) -> Screen? {
+                   paneCount: Int, command: String, accountID: UUID? = nil) -> Screen? {
         var paneCount = paneCount
         if !entitlement.isEntitled {
             let remaining = freePaneLimit - totalPanes
@@ -252,7 +280,7 @@ final class CockpitStore: ObservableObject {
             else { gitLog[UUID()] = "worktree failed: \(r.output)" }
         }
         let cwd = worktreePath ?? repoPath ?? FileManager.default.homeDirectoryForCurrentUser.path
-        let panes = (0..<max(1, paneCount)).map { PaneConfig(name: "pane \($0)", command: command, cwd: cwd) }
+        let panes = (0..<max(1, paneCount)).map { PaneConfig(name: "pane \($0)", command: command, cwd: cwd, accountID: accountID) }
         let screen = Screen(name: name, repoPath: repoPath, worktreePath: worktreePath,
                              branch: resolvedBranch, baseBranch: baseBranch, panes: panes)
         screens.append(screen)
@@ -315,7 +343,8 @@ final class CockpitStore: ObservableObject {
             // after it, rather than the screen's actual intended agent.
             let cwd = panes.first?.cwd ?? screens[i].worktreePath ?? FileManager.default.homeDirectoryForCurrentUser.path
             let cmd = panes.first?.command ?? "claude"
-            panes += (panes.count..<n).map { PaneConfig(name: "pane \($0)", command: cmd, cwd: cwd) }
+            let acct = panes.first?.accountID
+            panes += (panes.count..<n).map { PaneConfig(name: "pane \($0)", command: cmd, cwd: cwd, accountID: acct) }
         } else if n < panes.count {
             let removed = panes.suffix(panes.count - n)
             panes.removeLast(panes.count - n)
@@ -557,7 +586,8 @@ final class CockpitStore: ObservableObject {
             let obj: [String: Any] = [
                 "rateByAccount": rates,
                 "leanLiveCalls": leanLive.calls, "leanLiveTokens": leanLive.tokens,
-                "leanAllTimeCalls": leanAllTime?.calls ?? 0, "leanAllTimeTokens": leanAllTime?.tokens ?? 0
+                "leanAllTimeCalls": leanAllTime?.calls ?? 0, "leanAllTimeTokens": leanAllTime?.tokens ?? 0,
+                "accounts": accounts.map { ["name": $0.name, "kind": $0.kind.rawValue, "configDir": $0.configDir] }
             ]
             if let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted]) {
                 try? data.write(to: configDir.appendingPathComponent("state-dump.json"))
@@ -569,6 +599,14 @@ final class CockpitStore: ObservableObject {
             let key = o["key"] as? String ?? ""
             Task { let r = await self.activateLicense(key); flog("control: activate -> \(r ?? "OK")") }
         case "setPaneCount": if let s = screen, let n = o["count"] as? Int { setPaneCount(n, in: s.id) }
+        case "addAccount":
+            if let n = o["account"] as? String { addAccount(name: n, kind: Account.Kind(rawValue: o["kind"] as? String ?? "claude") ?? .claude) }
+        case "setAccount":
+            // pane on screen `name` -> account named `account` (or default when absent)
+            if let s = screen, let paneName = o["pane"] as? String,
+               let p = s.panes.first(where: { $0.name == paneName }) {
+                setAccount(pane: p.id, in: s.id, to: accounts.first { $0.name == (o["account"] as? String) }?.id)
+            }
         case "addScreen":
             addScreen(name: name ?? nextScreenName(prefix: "screen"), repoPath: o["repoPath"] as? String,
                       branch: o["branch"] as? String, baseBranch: o["baseBranch"] as? String ?? "main",
@@ -577,10 +615,104 @@ final class CockpitStore: ObservableObject {
         }
     }
 
+    // MARK: accounts
+
+    func account(_ id: UUID?) -> Account? { id.flatMap { i in accounts.first { $0.id == i } } }
+
+    /// Creates a new account with its own config dir under
+    /// ~/.config/fleet/accounts/. Seeds it from the default login's
+    /// settings so it behaves like your normal setup — same settings.json
+    /// (permissions, enabled plugins, and the fleet HUD statusLine if you
+    /// use it), and the same installed plugins (symlinked, so fleet-lean and
+    /// friends work without reinstalling). Never copies credentials: each
+    /// account signs in on its own.
+    @discardableResult
+    func addAccount(name: String, kind: Account.Kind) -> Account? {
+        let clean = name.trimmingCharacters(in: .whitespaces)
+        guard !clean.isEmpty, !accounts.contains(where: { $0.name == clean && $0.kind == kind }) else { return nil }
+        let slug = clean.lowercased().replacingOccurrences(of: #"[^a-z0-9]+"#, with: "-", options: .regularExpression)
+        let dir = configDir.appendingPathComponent("accounts/\(kind.rawValue)-\(slug)-\(UUID().uuidString.prefix(6).lowercased())")
+        let fm = FileManager.default
+        do { try fm.createDirectory(at: dir, withIntermediateDirectories: true) }
+        catch { notify("couldn't create account folder: \(error.localizedDescription)"); return nil }
+        let home = fm.homeDirectoryForCurrentUser
+        if kind == .claude {
+            let src = home.appendingPathComponent(".claude")
+            try? fm.copyItem(at: src.appendingPathComponent("settings.json"), to: dir.appendingPathComponent("settings.json"))
+            for shared in ["plugins", "CLAUDE.md", "agents", "commands", "skills"] {
+                let from = src.appendingPathComponent(shared)
+                if fm.fileExists(atPath: from.path) {
+                    try? fm.createSymbolicLink(at: dir.appendingPathComponent(shared), withDestinationURL: from)
+                }
+            }
+        } else {
+            try? fm.copyItem(at: home.appendingPathComponent(".codex/config.toml"), to: dir.appendingPathComponent("config.toml"))
+        }
+        let a = Account(name: clean, kind: kind, configDir: dir.path)
+        accounts.append(a)
+        if kind == .claude && hudInstalled { HUDManager.install(claudeConfigDir: dir) }
+        persist()
+        return a
+    }
+
+    /// Forgets an account. Panes on it fall back to the default login (and
+    /// restart). The folder is left on disk — it holds that account's
+    /// history, and deleting someone's data isn't a side effect of a
+    /// settings click.
+    func removeAccount(_ id: UUID) {
+        accounts.removeAll { $0.id == id }
+        for si in screens.indices {
+            for pi in screens[si].panes.indices where screens[si].panes[pi].accountID == id {
+                screens[si].panes[pi].accountID = nil
+            }
+        }
+        persist()
+    }
+
+    func setAccount(pane id: UUID, in screenID: UUID, to accountID: UUID?) {
+        guard let si = screens.firstIndex(where: { $0.id == screenID }),
+              let pi = screens[si].panes.firstIndex(where: { $0.id == id }),
+              screens[si].panes[pi].accountID != accountID else { return }
+        screens[si].panes[pi].accountID = accountID
+        statByPane[id] = nil // the old account's cost/context no longer applies
+        persist()
+    }
+
+    /// Opens a pane on `account` that walks through its login: a fresh
+    /// CLAUDE_CONFIG_DIR makes `claude` start its own sign-in flow; Codex
+    /// has an explicit `codex login`.
+    func openSignIn(_ account: Account) {
+        if !entitlement.isEntitled && totalPanes >= freePaneLimit {
+            requireUpgrade("The free tier runs \(freePaneLimit) panes. Close one to sign in, or upgrade.")
+            return
+        }
+        let pane = PaneConfig(name: "sign in · \(account.name)",
+                              command: account.kind == .claude ? "claude" : "codex login",
+                              cwd: FileManager.default.homeDirectoryForCurrentUser.path, accountID: account.id)
+        if let i = activeScreenIndex() {
+            screens[i].panes.append(pane)
+            select(screens[i].id)
+            focusRequest = pane.id
+        } else {
+            let s = Screen(name: "accounts", panes: [pane])
+            screens.append(s)
+            select(s.id)
+        }
+        persist()
+    }
+
     // MARK: HUD onboarding
 
-    func installHUD() { _ = HUDManager.install(); hudInstalled = HUDManager.isInstalled }
-    func uninstallHUD() { _ = HUDManager.uninstall(); hudInstalled = HUDManager.isInstalled }
+    func installHUD() {
+        _ = HUDManager.install()
+        for a in accounts where a.kind == .claude { HUDManager.install(claudeConfigDir: URL(fileURLWithPath: a.configDir)) }
+        hudInstalled = HUDManager.isInstalled
+    }
+    func uninstallHUD() {
+        _ = HUDManager.uninstall()
+        for a in accounts where a.kind == .claude { HUDManager.uninstall(claudeConfigDir: URL(fileURLWithPath: a.configDir)) }
+        hudInstalled = HUDManager.isInstalled
+    }
 
     // MARK: git sync
 

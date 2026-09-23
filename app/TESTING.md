@@ -9,7 +9,7 @@ Run the whole automated suite yourself any time:
 ./soak-test.sh &        # separate instance + config; see its header. `./soak-test.sh stop` ends it.
 ```
 
-Last full run: **59 passed, 0 failed, 1 skipped** (the skip is real UI automation, which
+Last full run: **63 passed, 0 failed, 1 skipped** (the skip is real UI automation, which
 needs Accessibility permission). The suite runs as an entitled "owner" except section 7c,
 which manages entitlement itself; it can't click, so it drives the app through a small
 control file (`$XDG_CONFIG_HOME/fleet/control.json`) — including a `dumpState` command that
@@ -24,7 +24,9 @@ don't crash) · 3c pane-grid identity (growing/shrinking pane count must not kil
 pane, not always the last one · 3e closing to zero screens actually persists as zero ·
 3f top-bar rollups (account-grouped rate limits, real fleet-lean savings, via `dumpState`)
 · 3g auto-naming from a real terminal-title escape sequence, and that a manually-named pane
-is never overwritten · 4 kill -9 · 5 git worktrees + real remote · 6 polling scale ·
+is never overwritten · 3h multi-account: a pane switched to an extra account really restarts
+with that account's `CLAUDE_CONFIG_DIR`/`FLEET_ACCOUNT` (read from the process's actual
+environment), while a default-account pane is left running untouched · 4 kill -9 · 5 git worktrees + real remote · 6 polling scale ·
 7 clean quit · 7b close/shrink kills agents · 7d safe worktree cleanup ·
 7e window hide/summon/hotkey · 7c licensing (12 checks incl. live Dodo endpoint) · 8 UI.
 

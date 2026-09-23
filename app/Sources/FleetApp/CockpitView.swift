@@ -126,12 +126,11 @@ struct CockpitView: View {
             // Rate limits used to repeat identically on every pane of the
             // same account (they're account-wide, not per-session), and a
             // brand-new pane with no reading yet just looked like it
-            // disagreed with the others. One chip per account here instead —
-            // today that's just "default" until multi-account support
-            // exists, but the grouping is already account-aware.
+            // disagreed with the others. One chip per account here instead,
+            // keyed by the FLEET_ACCOUNT the pane launched with.
             ForEach(store.rateByAccount.sorted(by: { $0.key < $1.key }), id: \.key) { key, r in
                 HStack(spacing: 6) {
-                    if key != "default" { Text(key).font(Theme.mono(10, .medium)).foregroundStyle(Theme.inkSoft) }
+                    if key != "default" || !store.accounts.isEmpty { Text(key).font(Theme.mono(10, .medium)).foregroundStyle(Theme.inkSoft) }
                     if let rl5 = r.rl5h { Text("5h \(rl5)%").foregroundStyle(fleetRateColor(rl5)) }
                     if let rl7 = r.rl7d { Text("7d \(rl7)%").foregroundStyle(fleetRateColor(rl7)) }
                 }
@@ -139,21 +138,12 @@ struct CockpitView: View {
                 .help("Claude Code rate limits for this account")
             }
 
-            // Real, code-computed fleet-lean savings (plugin-lean/report.js's
-            // same numbers) — never a fabricated figure. Hidden entirely if
-            // fleet-lean has never run, rather than showing "0 saved".
-            if let all = store.leanAllTime, all.calls > 0 {
-                HStack(spacing: 4) {
-                    Image(systemName: "arrow.down.circle").font(.system(size: 10))
-                    if store.leanLive.calls > 0 {
-                        Text("↓\(fleetCompact(store.leanLive.tokens)) tok live")
-                    } else {
-                        Text("↓\(fleetCompact(all.tokens)) tok all-time")
-                    }
-                }
-                .font(Theme.mono(11)).foregroundStyle(Theme.accentInk).lineLimit(1).fixedSize()
-                .help("fleet-lean: \(all.calls) built-in calls avoided all-time (exact), ~\(all.tokens) tokens avoided (est.) — see /fleet-lean-report")
-            }
+            // No fleet-lean "tokens saved" chip: plugin-lean/eval measured
+            // fleet-lean against plain Claude Code on real tasks and it costs
+            // MORE, not less (see plugin-lean/eval/RESULTS.md) — its
+            // "tokens avoided" figure is relative to whole-file Reads that
+            // Claude Code doesn't actually do. Showing it would be a made-up
+            // saving. Bring a chip back only once the eval shows a real win.
 
             let totalWaiting = store.screens.reduce(0) { $0 + store.waitingCount($1) }
             if totalWaiting > 0 {
@@ -560,12 +550,14 @@ private struct PaneCell: View {
             if store.isLocked(pane.id) {
                 lockedPane
             } else {
-                TerminalPane(pane: pane, focusRequest: $store.focusRequest, command: resumeCommand, onExit: { code in
+                TerminalPane(pane: pane, account: store.account(pane.accountID), focusRequest: $store.focusRequest, command: resumeCommand, onExit: { code in
                     exitCode = code; exited = true
                 }, onTitle: { title in
                     store.autoName(pane: pane.id, in: screenID, title: title)
                 })
-                .id("\(pane.id.uuidString)-\(restartToken)")   // bump = fresh PTY
+                // bump = fresh PTY; an account switch also restarts (a running
+                // process can't change which login it's using)
+                .id("\(pane.id.uuidString)-\(restartToken)-\(pane.accountID?.uuidString ?? "default")")
                 .overlay { if exited { restartOverlay } }
             }
         }
@@ -635,6 +627,7 @@ private struct PaneCell: View {
                 }
                 Spacer()
                 if let m = stat?.model { Text(m).font(Theme.mono(10)).foregroundStyle(Theme.inkFaint) }
+                accountMenu
                 Button { toggleMaximize() } label: {
                     Image(systemName: isMaximized ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                 }
@@ -667,6 +660,42 @@ private struct PaneCell: View {
     private func statChip(_ text: String, _ color: Color) -> some View {
         Text(text).font(Theme.mono(9.5, .medium)).foregroundStyle(color)
     }
+
+    /// Which login this pane runs under. Only shown once you've added an
+    /// account of this pane's kind — with just the default login there's
+    /// nothing to choose.
+    @ViewBuilder private var accountMenu: some View {
+        let choices = store.accounts.filter { $0.kind == pane.agentKind }
+        if !choices.isEmpty {
+            Menu {
+                Button { switchAccount(to: nil) } label: {
+                    if pane.accountID == nil { Label("Default login", systemImage: "checkmark") } else { Text("Default login") }
+                }
+                ForEach(choices) { a in
+                    Button { switchAccount(to: a.id) } label: {
+                        if pane.accountID == a.id { Label(a.name, systemImage: "checkmark") } else { Text(a.name) }
+                    }
+                }
+            } label: {
+                Text(store.account(pane.accountID)?.name ?? "default")
+                    .font(Theme.mono(10, .medium)).foregroundStyle(pane.accountID == nil ? Theme.inkFaint : Theme.accentInk)
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .help("Account this pane runs under — switching restarts the pane")
+        }
+    }
+    private func switchAccount(to id: UUID?) {
+        guard id != pane.accountID else { return }
+        if stat?.state == "working" {
+            let a = NSAlert()
+            a.messageText = "Restart “\(pane.name)” on another account?"
+            a.informativeText = "Its agent is still running and will be stopped. Chat history is per account, so the new session starts fresh."
+            a.addButton(withTitle: "Switch"); a.addButton(withTitle: "Cancel")
+            guard a.runModal() == .alertFirstButtonReturn else { return }
+        }
+        exited = false
+        store.setAccount(pane: pane.id, in: screenID, to: id)
+    }
     private func ctxColor(_ c: Int) -> Color { c >= 85 ? Theme.red : c >= 60 ? Theme.amber : Theme.inkFaint }
 
     private var dotColor: Color {
@@ -692,6 +721,7 @@ private struct NewScreenSheet: View {
     @State private var baseBranch = "main"
     @State private var paneCount = 2
     @State private var command = "claude"
+    @State private var accountKey = "default"   // "default" or an Account id string
     @State private var useGit = true
 
     var body: some View {
@@ -722,6 +752,15 @@ private struct NewScreenSheet: View {
                 Chip(options: [("claude", "claude"), ("codex", "codex"), ("custom", "custom…")], selection: $command)
                 if command == "custom" { TextField("command", text: $command).textFieldStyle(FleetFieldStyle()).frame(width: 120) }
             }
+            let kind: Account.Kind = command == "codex" ? .codex : .claude
+            let choices = store.accounts.filter { $0.kind == kind }
+            if !choices.isEmpty {
+                HStack {
+                    Text("Account").foregroundStyle(Theme.inkSoft)
+                    Spacer()
+                    Chip(options: [("default", "default")] + choices.map { ($0.id.uuidString, $0.name) }, selection: $accountKey)
+                }
+            }
             HStack {
                 Spacer()
                 FleetButton(title: "Cancel") { isPresented = false }
@@ -745,7 +784,8 @@ private struct NewScreenSheet: View {
     private func create() {
         store.addScreen(name: name, repoPath: useGit ? repoPath : nil,
                          branch: branch.isEmpty ? nil : branch, baseBranch: baseBranch,
-                         paneCount: paneCount, command: command == "custom" ? "claude" : command)
+                         paneCount: paneCount, command: command == "custom" ? "claude" : command,
+                         accountID: store.accounts.first { $0.id.uuidString == accountKey && $0.kind == (command == "codex" ? .codex : .claude) }?.id)
         isPresented = false
     }
 }

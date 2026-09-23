@@ -14,7 +14,7 @@
     {
       "name": "fleet-lean",
       "source": "./plugin-lean",
-      "description": "Fused search + batch multi-file edit tools that cut tool round-trips and token spend. Core tools are free, no account, no cloud. Optional fleet-lean Cloud subscription (not live yet) adds cross-machine savings sync.",
+      "description": "Experimental: fused search + batch multi-file edit tools for Claude Code. Our own A/B eval found they do NOT currently reduce cost vs plain Claude Code (see plugin-lean/eval/RESULTS.md). Free, local, no account.",
       "version": "0.4.0"
     }
   ]

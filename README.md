@@ -47,21 +47,14 @@ Claude Code plugin (auto power-management + attention flags per session):
 /plugin install fleet@fleet-marketplace
 ```
 
-## fleet-lean — cut token spend, no account needed
+## fleet-lean — experimental
 
-A separate, free-forever, MIT plugin: two tools (`lean_search`, `lean_edit`) that fuse
-several built-in Claude Code tool calls into one, so routine search-and-edit work costs
-fewer round-trips and fewer tokens. Runs entirely as a local MCP server — no signup, no
-cloud, no dependency on the rest of fleet. See [plugin-lean/README.md](plugin-lean/README.md).
-
-```
-/plugin install fleet-lean@fleet-marketplace
-/fleet-lean-report      # after a session, see calls/tokens it saved (session + all-time, this machine)
-```
-
-An optional **fleet-lean Cloud** subscription (not live yet — no product configured,
-no sync server built) is planned for cross-machine savings sync; the tools and the
-local report above stay free forever regardless of whether that ships.
+A separate MIT plugin with two fused tools (`lean_search`, `lean_edit`). **It does not
+currently save money:** a real A/B eval against plain Claude Code (same tasks, strict
+verification, Claude Code's own cost numbers) found it ~11% *more* expensive, because
+Claude Code already searches and edits efficiently through Bash. Method, per-version
+numbers and transcripts: [plugin-lean/eval/](plugin-lean/eval/RESULTS.md). It stays in the
+repo as a research track; re-run `node plugin-lean/eval/eval.js` before claiming otherwise.
 
 ## The HUD — cost & context per session
 

@@ -105,14 +105,18 @@ function main() {
   lines.push(`  fleet-lean calls made:        ${s.calls}`);
   lines.push(`  built-in calls avoided:       ${s.callsAvoided}  (exact count, from the tool's own output)`);
   lines.push(`  est. tokens used by fleet-lean: ~${fmt(s.estTokensUsed)}  (bytes/4 heuristic, not exact)`);
-  lines.push(`  est. tokens avoided:          ~${fmt(s.estTokensAvoided)}  (bytes/4 of files a vanilla Read would` +
-    ` have returned in full, minus what fleet-lean actually returned — a real baseline, still an estimate insofar` +
-    ` as bytes/4 is)`);
+  lines.push(`  est. tokens avoided:          ~${fmt(s.estTokensAvoided)}  (vs. reading every matched file in full —` +
+    ` an upper bound, NOT a measured saving: see caveat below)`);
 
   lines.push('');
   lines.push(`all-time (this machine, ${all.days} day${all.days === 1 ? '' : 's'} with activity):`);
   lines.push(`  calls avoided:                ${all.callsAvoided}`);
   lines.push(`  est. tokens avoided:          ~${fmt(all.estTokensAvoided)}`);
+  lines.push('');
+  lines.push('CAVEAT: the "avoided" numbers compare against built-in calls Claude Code');
+  lines.push('often would NOT have made (it searches with grep via Bash, not whole-file');
+  lines.push('Reads). A real A/B eval (plugin-lean/eval/RESULTS.md) found fleet-lean');
+  lines.push('costs ~11% MORE than plain Claude Code on typical search/edit tasks.');
   lines.push('');
   lines.push('No dollar figure: the HUD sidecar records total session cost, not a token');
   lines.push('count, so there is no $/token ratio to convert against without guessing one.');

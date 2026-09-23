@@ -196,7 +196,7 @@ function truncateLine(l) {
   return l.length > MAX_LINE_CHARS ? l.slice(0, MAX_LINE_CHARS) + ' …[truncated]' : l;
 }
 
-function leanSearch({ pattern, query, isRegex = false, caseInsensitive = false, contextLines = 3, maxResults = 30, cwd }) {
+function leanSearch({ pattern, query, isRegex = false, caseInsensitive = false, contextLines = 0, maxResults = 50, filesOnly = false, cwd }) {
   const root = path.resolve(cwd || process.cwd());
   const ignoreNames = readRootIgnoreNames(root);
   const all = [];
@@ -250,16 +250,16 @@ function leanSearch({ pattern, query, isRegex = false, caseInsensitive = false, 
   });
 
   const out = [];
-  let outBytes = 0, truncated = false;
+  let outBytes = 0, truncated = false, hitMaxResults = false;
   let round = 0, remaining = perFile.filter(f => f.windows.length > 0);
   outer:
   while (remaining.length) {
     for (const f of remaining) {
       if (round >= f.windows.length) continue;
-      if (out.length >= maxResults) break outer;
+      if (out.length >= maxResults) { hitMaxResults = true; break outer; }
       const w = f.windows[round];
       const snippet = f.lines.slice(w.start, w.end).map(truncateLine).join('\n');
-      const entry = { file: f.file, lineNumber: w.hitLines[0], matchedLines: w.hitLines, snippet };
+      const entry = { file: f.file, lineNumber: w.hitLines[0], startLine: w.start + 1, matchedLines: w.hitLines, snippet };
       const entryBytes = JSON.stringify(entry).length;
       if (outBytes + entryBytes > MAX_OUTPUT_BYTES) { truncated = true; break outer; }
       out.push(entry); outBytes += entryBytes;
@@ -269,11 +269,13 @@ function leanSearch({ pattern, query, isRegex = false, caseInsensitive = false, 
   }
 
   return {
-    matches: out,
+    matches: filesOnly ? [] : out,
+    files: filesOnly ? results.map(r => r.file) : undefined,
     filesScanned: files.length,
     filesMatched: results.length,
     filesSkippedBinary,
     truncated, // true if results were cut short by the output size cap, not just maxResults
+    hitMaxResults: filesOnly ? false : hitMaxResults,
     vanillaReadBytes // real byte total of matched files — the Read-equivalent cost this call avoided
   };
 }
@@ -387,6 +389,37 @@ function findAllMatches(find, text, fuzzy = false) {
   return exactOnly.length ? exactOnly : out;
 }
 
+/** Exact substring matches of `find` in `text` — the same semantics as
+ *  Claude Code's built-in Edit tool (old_string can be any fragment, not a
+ *  whole line), which is what the model already expects. Tried FIRST; the
+ *  line-based normalized matcher above is only a fallback for find text
+ *  whose whitespace/quotes don't match byte-for-byte.
+ *  Before this existed, `find: "formatCurrency(total)"` failed with "no
+ *  match found" because only whole lines matched — the eval (eval/eval.js)
+ *  caught the model burning 6 extra turns fighting it. */
+function findSubstringMatches(find, text) {
+  const out = [];
+  for (let i = text.indexOf(find); i >= 0; i = text.indexOf(find, i + find.length)) {
+    out.push({ from: i, to: i + find.length, distance: 0, substring: true,
+      start: text.slice(0, i).split('\n').length - 1, matchedText: find });
+  }
+  return out;
+}
+
+/** Converts a line-range match from findAllMatches into the same char-range
+ *  shape substring matches use, with its (reindented) replacement text
+ *  precomputed, so both kinds apply and overlap-check identically. */
+function lineMatchToRange(text, find, replace, match) {
+  const lines = text.split('\n');
+  let from = 0;
+  for (let i = 0; i < match.start; i++) from += lines[i].length + 1;
+  let to = from;
+  for (let i = match.start; i < match.end; i++) to += lines[i].length + (i < match.end - 1 ? 1 : 0);
+  const block = lines.slice(match.start, match.end).join('\n');
+  const replaced = applyReplace(block, find, replace, { start: 0, end: match.end - match.start });
+  return { ...match, from, to, replacement: replaced };
+}
+
 function applyReplace(text, find, replace, match) {
   const fileLines = text.split('\n');
   const findLines = find.split('\n');
@@ -461,15 +494,22 @@ function leanEdit({ edits }) {
     const resolved = [];
     let ok = true;
     for (const e of fileEdits) {
-      const matches = findAllMatches(e.find, text, e.fuzzy === true);
+      let matches = findSubstringMatches(e.find, text).map(m => ({ ...m, replacement: e.replace }));
+      if (matches.length === 0) {
+        matches = findAllMatches(e.find, text, e.fuzzy === true).map(m => lineMatchToRange(text, e.find, e.replace, m));
+      }
       if (matches.length === 0) {
         failures.push({ file: displayFile, find: e.find.slice(0, 80), error: 'no match found' + (e.fuzzy ? ' (not even fuzzy)' : ' — pass fuzzy:true to allow approximate matches') });
         ok = false; continue;
       }
+      if (e.replaceAll === true) {
+        for (const m of matches) resolved.push({ edit: e, match: m });
+        continue;
+      }
       if (matches.length > 1 && e.occurrence == null) {
         failures.push({
           file: displayFile, find: e.find.slice(0, 80),
-          error: `ambiguous: ${matches.length} matches found — pass "occurrence" to disambiguate`,
+          error: `ambiguous: ${matches.length} matches found — pass "occurrence" to pick one, "replaceAll": true to change every one, or a longer find`,
           matchedLines: matches.map(m => m.start + 1)
         });
         ok = false; continue;
@@ -491,12 +531,12 @@ function leanEdit({ edits }) {
     // Reject overlapping matches within the same file — applying both would
     // corrupt the file (one edit's line range eating into another's), and
     // there is no "correct" way to guess which one the caller meant to win.
-    resolved.sort((a, b) => a.match.start - b.match.start);
+    resolved.sort((a, b) => a.match.from - b.match.from);
     for (let i = 1; i < resolved.length; i++) {
-      if (resolved[i].match.start < resolved[i - 1].match.end) {
+      if (resolved[i].match.from < resolved[i - 1].match.to) {
         failures.push({
           file: displayFile,
-          error: `overlapping edits: match at line ${resolved[i - 1].match.start + 1} and match at line ${resolved[i].match.start + 1} touch the same lines — split into separate calls or adjust the find text`
+          error: `overlapping edits: match at line ${resolved[i - 1].match.start + 1} and match at line ${resolved[i].match.start + 1} touch the same text — split into separate calls or adjust the find text`
         });
         ok = false; break;
       }
@@ -527,10 +567,10 @@ function leanEdit({ edits }) {
 
   // Build every file's final content in memory first — no disk writes yet.
   const writePlan = plan.map(({ file, displayFile, originalRaw, hadCRLF, text, resolved }) => {
-    // apply in reverse line order so earlier matches' line numbers don't shift
-    const inReverse = [...resolved].sort((a, b) => b.match.start - a.match.start);
+    // apply in reverse offset order so earlier matches' offsets don't shift
+    const inReverse = [...resolved].sort((a, b) => b.match.from - a.match.from);
     let out = text;
-    for (const { edit, match } of inReverse) out = applyReplace(out, edit.find, edit.replace, match);
+    for (const { match } of inReverse) out = out.slice(0, match.from) + match.replacement + out.slice(match.to);
     if (hadCRLF) out = out.replace(/\n/g, '\r\n');
     return { file, displayFile, originalRaw, out, tmpPath: `${file}.leanedit-${process.pid}.tmp`, editCount: resolved.length };
   });
@@ -574,7 +614,7 @@ function leanEdit({ edits }) {
 const TOOLS = [
   {
     name: 'lean_search',
-    description: 'Search files by glob pattern and content match in one call, returning ranked snippets (matched line ± context) instead of full file contents. Skips binary files. Output is capped in size (~60KB) and merges overlapping context windows, and spreads results round-robin across matched files so one noisy file can\'t crowd out the rest. Use this instead of separate Glob+Grep+Read calls.',
+    description: 'Search files matching a glob for a text or regex, in one call. Output is grep-style plain text (file:line:text, context lines as file-line-text), capped in size, spread round-robin across files so one noisy file cannot crowd out the rest. Skips binary files and ignored dirs (node_modules, .git, build output). Use filesOnly for just the file list, contextLines to see surrounding code.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -582,8 +622,9 @@ const TOOLS = [
         query: { type: 'string', description: 'Text or regex to match within files' },
         isRegex: { type: 'boolean', default: false },
         caseInsensitive: { type: 'boolean', default: false },
-        contextLines: { type: 'integer', default: 3 },
-        maxResults: { type: 'integer', default: 30 },
+        contextLines: { type: 'integer', default: 0, description: 'Lines of context around each match (like grep -C). 0 = matching lines only' },
+        maxResults: { type: 'integer', default: 50 },
+        filesOnly: { type: 'boolean', default: false, description: 'Return only the list of matching file paths (like grep -l)' },
         cwd: { type: 'string', description: 'Root directory to search from (default: server cwd)' }
       },
       required: ['pattern', 'query']
@@ -591,7 +632,7 @@ const TOOLS = [
   },
   {
     name: 'lean_edit',
-    description: 'Apply one or more find-and-replace edits across one or more files in a single call. Matches EXACT text only by default (after whitespace/unicode-punctuation normalization) — it never guesses. Rejects with no changes made if a find text matches more than one place (pass "occurrence" to disambiguate) or if two edits in the same batch would touch overlapping lines. The whole batch is atomic: if anything fails to resolve or write, no file is changed. Set fuzzy:true on an edit to allow a small Levenshtein-distance match when no exact match exists (only for find text of 24+ characters, to avoid short strings matching the wrong nearby line) — any fuzzy match actually used is always reported back in the result, never applied silently. Use this instead of separate Read+Edit calls, especially across multiple files.',
+    description: 'Apply one or more find-and-replace edits across one or more files in a single call, with no prior Read needed. `find` works like the built-in Edit tool\'s old_string: any exact fragment of the file (not just whole lines). If there is no exact match, it retries line-by-line ignoring whitespace/indentation and curly-quote differences, reindenting the replacement to fit. If a find matches more than one place the batch is rejected with the line numbers, unless you pass "occurrence" (pick one) or "replaceAll": true (change every one — use this for renames). Two edits touching the same text are rejected. The whole batch is atomic: if anything fails to resolve or write, no file is changed. fuzzy:true allows a small Levenshtein-distance match when nothing else matches (find must be 24+ chars); any fuzzy match used is reported back, never applied silently.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -604,6 +645,7 @@ const TOOLS = [
               find: { type: 'string' },
               replace: { type: 'string' },
               occurrence: { type: 'integer', description: '1-based index to disambiguate multiple matches' },
+              replaceAll: { type: 'boolean', default: false, description: 'Replace every match of find in this file (e.g. renaming an identifier)' },
               fuzzy: { type: 'boolean', default: false, description: 'Allow an approximate match if no exact match is found (find must be 24+ chars)' }
             },
             required: ['file', 'find', 'replace']
@@ -615,6 +657,48 @@ const TOOLS = [
   }
 ];
 
+const SERVER_INSTRUCTIONS = [
+  'fleet-lean provides two tools that replace several built-in calls with one:',
+  '- lean_search: glob + content search that returns only the matching lines with context, capped in size. Prefer it over reading whole files or chaining find/grep/cat when you need to locate code.',
+  '- lean_edit: a batch of exact find-and-replace edits across one or more files, applied atomically in a single call, no prior Read needed. Prefer it over Read+Edit pairs, and over sed, for renames and multi-file edits.',
+  'Both report exactly what they did: a search is complete unless it says INCOMPLETE, and a successful lean_edit lists every file it changed (a failed one changes nothing). Re-checking their results with grep or Read is wasted turns.',
+  'Load them with ToolSearch ("select:mcp__fleet-lean__lean_search,mcp__fleet-lean__lean_edit") if they are deferred.'
+].join('\n');
+
+/** What the MODEL sees. JSON with escaped quotes/newlines costs noticeably
+ *  more tokens than the same facts as plain text, and the eval showed
+ *  lean_search losing to a plain `grep -n` partly on exactly that. So
+ *  results render grep-style: `file:line:text` for matching lines,
+ *  `file-line-text` for context, `--` between windows. The structured
+ *  object is still what tests and the savings sidecar use. */
+function renderSearch(out) {
+  const lines = [];
+  if (out.files) lines.push(...out.files);
+  for (const m of out.matches) {
+    if (lines.length && !out.files && m.snippet.includes('\n')) lines.push('--');
+    const hit = new Set(m.matchedLines);
+    m.snippet.split('\n').forEach((t, i) => {
+      const n = m.startLine + i;
+      lines.push(`${m.file}${hit.has(n) ? ':' : '-'}${n}${hit.has(n) ? ':' : '-'}${t}`);
+    });
+  }
+  // State completeness explicitly. "[10 of 20 files matched]" read to the
+  // model as "results were cut off", and it re-ran the search with grep to
+  // double-check — an extra turn every time (seen in eval transcripts).
+  const complete = !out.truncated && !out.hitMaxResults;
+  const tail = complete
+    ? `[complete: every match in ${out.filesMatched} file${out.filesMatched === 1 ? '' : 's'} is listed above; the other ${out.filesScanned - out.filesMatched} scanned file${out.filesScanned - out.filesMatched === 1 ? '' : 's'} have no match]`
+    : `[INCOMPLETE: ${out.truncated ? 'output size cap reached' : 'maxResults reached'} — ${out.filesMatched} files matched; narrow the pattern or raise maxResults]`;
+  return (lines.length ? lines.join('\n') + '\n' : '') + tail;
+}
+
+function renderEdit(out) {
+  if (!out.ok) return JSON.stringify({ ok: false, error: out.error, failures: out.failures });
+  let t = `ok: applied ${out.applied} edit${out.applied === 1 ? '' : 's'} to ${out.filesWritten.length} file${out.filesWritten.length === 1 ? '' : 's'}: ${out.filesWritten.join(', ')}`;
+  if (out.fuzzyMatches && out.fuzzyMatches.length) t += '\nfuzzy matches used: ' + JSON.stringify(out.fuzzyMatches);
+  return t;
+}
+
 function handle(req) {
   const { id, method, params } = req;
   const reply = result => ({ jsonrpc: '2.0', id, result });
@@ -624,7 +708,12 @@ function handle(req) {
     return reply({
       protocolVersion: '2024-11-05',
       capabilities: { tools: {} },
-      serverInfo: { name: 'fleet-lean', version: '0.1.0' }
+      serverInfo: { name: 'fleet-lean', version: '0.4.0' },
+      // Claude Code defers MCP tools behind ToolSearch and shows the model
+      // only their names, so without this the model almost never picks them
+      // (measured: 0 calls across a full eval run — see eval/README.md).
+      // MCP `instructions` land in the system prompt.
+      instructions: SERVER_INSTRUCTIONS
     });
   }
   if (method === 'notifications/initialized' || method === 'notifications/cancelled') {
@@ -642,7 +731,7 @@ function handle(req) {
       else if (name === 'lean_edit') out = leanEdit(args || {});
       else return replyErr(-32601, `unknown tool: ${name}`);
 
-      const outStr = JSON.stringify(out);
+      const outStr = name === 'lean_search' ? renderSearch(out) : renderEdit(out);
       recordCall({
         tool: name,
         inputBytes: before,

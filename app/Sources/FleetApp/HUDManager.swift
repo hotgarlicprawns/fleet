@@ -79,6 +79,29 @@ enum HUDManager {
         } catch { return false }
     }
 
+    /// Wires the HUD into an extra account's own settings.json (Claude Code
+    /// reads settings from $CLAUDE_CONFIG_DIR, not ~/.claude, when it's
+    /// set). Uses the same installed script; no previous-statusLine
+    /// bookkeeping — an account folder fleet created has nothing to restore.
+    static func install(claudeConfigDir dir: URL) {
+        // Only ever copies the script — never falls back to install(), which
+        // would also rewrite the DEFAULT ~/.claude/settings.json as a side
+        // effect of adding an account.
+        guard FileManager.default.fileExists(atPath: installedScript.path) || copyScript() else { return }
+        let url = dir.appendingPathComponent("settings.json")
+        var settings = readJSON(url) ?? [:]
+        settings["statusLine"] = ["type": "command", "command": installedScript.path, "padding": 0]
+        writeJSON(url, settings)
+    }
+
+    static func uninstall(claudeConfigDir dir: URL) {
+        let url = dir.appendingPathComponent("settings.json")
+        guard var settings = readJSON(url),
+              let cmd = (settings["statusLine"] as? [String: Any])?["command"] as? String, cmd.contains("fleet") else { return }
+        settings.removeValue(forKey: "statusLine")
+        writeJSON(url, settings)
+    }
+
     @discardableResult
     static func uninstall() -> String {
         var settings = readJSON(claudeSettings) ?? [:]
@@ -90,6 +113,16 @@ enum HUDManager {
         }
         writeJSON(claudeSettings, settings)
         return "removed"
+    }
+
+    private static func copyScript() -> Bool {
+        guard let src = bundledScript else { return false }
+        do {
+            try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: src, to: installedScript)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: installedScript.path)
+            return true
+        } catch { return false }
     }
 
     private static func readJSON(_ url: URL) -> [String: Any]? {

@@ -123,16 +123,9 @@ cp server/index.js "$MUT_SERVER"
 trap 'rm -f "$MUT_SERVER"' EXIT
 python3 -c "
 s = open('$MUT_SERVER').read()
-old = '''      if (matches.length > 1 && e.occurrence == null) {
-        failures.push({
-          file: displayFile, find: e.find.slice(0, 80),
-          error: \`ambiguous: \${matches.length} matches found — pass \"occurrence\" to disambiguate\`,
-          matchedLines: matches.map(m => m.start + 1)
-        });
-        ok = false; continue;
-      }'''
-assert old in s, 'could not find the guard to mutate — check the source has not moved'
-s = s.replace(old, '      // MUTATED: ambiguity guard disabled for this test run', 1)
+old = '      if (matches.length > 1 && e.occurrence == null) {'
+assert s.count(old) == 1, 'could not find the guard to mutate — check the source has not moved'
+s = s.replace(old, '      if (false) { // MUTATED: ambiguity guard disabled for this test run', 1)
 open('$MUT_SERVER', 'w').write(s)
 "
 cat > "$T/ambig2.txt" <<'EOF'
@@ -483,6 +476,20 @@ else
   fail "report.js did not correctly isolate this session's numbers"
 fi
 rm -rf "$RPT_DIR"
+
+# ---------------------------------------------------------------------------
+section "14. eval-driven fixes: substring find, replaceAll, grep-style output (2026-09-24)"
+# Each of these was found by eval/eval.js transcripts, not by guessing:
+# the model's natural find text is a fragment ("formatCurrency(total)"), which
+# the old whole-line matcher rejected; renames need replaceAll; and JSON output
+# + an ambiguous "N of M files matched" footer made it re-verify with grep.
+E14=$(mktemp -d /tmp/fleet-lean-e14.XXXXXX)
+if XDG_CONFIG_HOME="$E14/cfg" E14="$E14" SERVER="$SERVER" node test/eval-fixes.test.js 2>&1 | tail -3 | grep -qx ok; then
+  pass "fragment find, replaceAll, whitespace fallback, grep-style output and server instructions all hold"
+else
+  fail "eval-driven fixes regressed — rerun section 14 by hand for the assertion message"
+fi
+rm -rf "$E14"
 
 # ---------------------------------------------------------------------------
 git -C . worktree remove --force "$T" 2>/dev/null || rm -rf "$T"

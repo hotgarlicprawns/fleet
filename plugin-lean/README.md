@@ -1,8 +1,14 @@
 # fleet-lean
 
-Two Claude Code tools that fuse several built-in tool calls into one, so a
-session makes fewer round-trips and spends fewer tokens doing routine
-search-and-edit work.
+Two Claude Code tools that fuse several built-in tool calls into one.
+
+> **Measured result: it does not save money yet.** An A/B eval against plain
+> Claude Code (`eval/`, real headless runs, strict verification) found fleet-lean
+> ~11% more expensive at its best, because Claude Code already searches with
+> `grep` and edits with `sed` through Bash, and MCP tools pay an extra
+> ToolSearch round trip. See [eval/RESULTS.md](eval/RESULTS.md). The
+> "tokens avoided" figure in the report below is an upper bound against
+> whole-file Reads, not a measured saving.
 
 **No account. No cloud. No telemetry that leaves this machine.** It's a local
 MCP server (plain Node, stdio) that Claude Code starts as a subprocess. It
@@ -58,7 +64,7 @@ run to run). It reports:
 
 - **calls avoided** — an exact count, from the tool's own output (e.g.
   `lean_search` replacing `1 Glob + 1 Grep + N Read`), never an estimate.
-- **est. tokens avoided** — a real, defensible baseline: the actual byte size
+- **est. tokens avoided** — an upper bound, NOT a measured saving (see the eval): the actual byte size
   of every file `lean_search`/`lean_edit` read (which a normal workflow would
   have paid for via `Read`), minus what the fused call actually returned,
   converted to tokens via the same `bytes/4` heuristic used everywhere else

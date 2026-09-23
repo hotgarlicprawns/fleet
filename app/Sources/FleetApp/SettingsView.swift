@@ -1,23 +1,21 @@
 import SwiftUI
 
 /// Fleet's Settings window (⌘,). Houses controls that used to crowd the
-/// main toolbar — power mode, display pin, HUD toggle — plus license
-/// management. An "Accounts" tab (for running multiple Claude/Codex
-/// subscriptions side by side) is planned but not built yet: it needs a
-/// real Account data model and per-pane environment wiring first, and
-/// whether extra accounts are a Pro-gated feature is a product decision,
-/// not a technical one — deliberately not guessed here.
+/// main toolbar — power mode, display pin, HUD toggle — plus accounts
+/// (several Claude/Codex subscriptions side by side) and license management.
 struct SettingsView: View {
     var body: some View {
         TabView {
             GeneralSettingsTab()
                 .tabItem { Label("General", systemImage: "gearshape") }
+            AccountsSettingsTab()
+                .tabItem { Label("Accounts", systemImage: "person.2") }
             IntegrationsSettingsTab()
                 .tabItem { Label("Integrations", systemImage: "puzzlepiece.extension") }
             LicenseSettingsTab()
                 .tabItem { Label("License", systemImage: "key") }
         }
-        .frame(width: 520, height: 360)
+        .frame(width: 560, height: 420)
     }
 }
 
@@ -60,15 +58,65 @@ private struct GeneralSettingsTab: View {
     }
 }
 
+private struct AccountsSettingsTab: View {
+    @EnvironmentObject var store: CockpitStore
+    @State private var newName = ""
+    @State private var newKind: Account.Kind = .claude
+
+    private func abbreviate(_ path: String) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                HStack {
+                    Image(systemName: "person.crop.circle").foregroundStyle(.secondary)
+                    Text("Default login").font(.callout)
+                    Spacer()
+                    Text("~/.claude · ~/.codex").font(Theme.mono(10.5)).foregroundStyle(.secondary)
+                }
+                ForEach(store.accounts) { a in
+                    HStack {
+                        Image(systemName: a.kind == .claude ? "sparkle" : "chevron.left.forwardslash.chevron.right")
+                            .foregroundStyle(Theme.accent)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(a.name).font(.callout)
+                            Text("\(a.kind.rawValue) · \(abbreviate(a.configDir))")
+                                .font(Theme.mono(10)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        }
+                        Spacer()
+                        Button("Sign in") { store.openSignIn(a) }
+                            .help(a.kind == .claude ? "Opens a pane running claude on this account — it walks you through login" : "Opens a pane running codex login on this account")
+                        Button(role: .destructive) { store.removeAccount(a.id) } label: { Image(systemName: "minus.circle") }
+                            .buttonStyle(.plain).foregroundStyle(.secondary)
+                            .help("Forget this account (its folder is kept on disk)")
+                    }
+                }
+            } header: { Text("Accounts") } footer: {
+                Text("Each account is its own Claude Code (CLAUDE_CONFIG_DIR) or Codex (CODEX_HOME) folder with its own login, history and rate limits. New accounts copy your settings and share your installed plugins. Pick a pane's account from the name next to its model; the top bar shows 5h/7d limits per account.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            Section("Add account") {
+                HStack {
+                    TextField("Name, e.g. work", text: $newName).textFieldStyle(.roundedBorder)
+                    Picker("", selection: $newKind) {
+                        ForEach(Account.Kind.allCases, id: \.self) { Text($0 == .claude ? "Claude Code" : "Codex").tag($0) }
+                    }.labelsHidden().fixedSize()
+                    Button("Add") {
+                        if let a = store.addAccount(name: newName, kind: newKind) { newName = ""; store.openSignIn(a) }
+                    }.disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                Text("Adding opens a sign-in pane right away.").font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
 private struct IntegrationsSettingsTab: View {
     @EnvironmentObject var store: CockpitStore
-
-    private var leanSavingsFile: URL {
-        let base = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"].map(URL.init(fileURLWithPath:))
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config")
-        return base.appendingPathComponent("fleet/lean-savings.json")
-    }
-    private var leanInstalled: Bool { FileManager.default.fileExists(atPath: leanSavingsFile.path) }
 
     var body: some View {
         Form {
@@ -80,24 +128,9 @@ private struct IntegrationsSettingsTab: View {
                 Text("Wires a statusLine into Claude Code. Your previous statusLine, if any, is kept and restored on removal.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
-            Section("fleet-lean — token-saving tools") {
-                if leanInstalled {
-                    Label("Installed — real savings tracked at ~/.config/fleet/lean-savings.json", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(Theme.accent).font(.callout)
-                } else {
-                    Label("Not installed", systemImage: "circle").font(.callout).foregroundStyle(.secondary)
-                    Text("Free, no account, works standalone. Install from a Claude Code session:")
-                        .font(.footnote).foregroundStyle(.secondary)
-                    HStack {
-                        Text("/plugin install fleet-lean@fleet-marketplace")
-                            .font(Theme.mono(11)).textSelection(.enabled)
-                        Spacer()
-                        Button {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString("/plugin install fleet-lean@fleet-marketplace", forType: .string)
-                        } label: { Image(systemName: "doc.on.doc") }.buttonStyle(.plain)
-                    }
-                }
+            Section("fleet-lean (experimental)") {
+                Text("Our own A/B eval found fleet-lean does not reduce cost versus current Claude Code — it came out about 11% more expensive on real tasks, because Claude Code already searches and edits efficiently through Bash. Fleet doesn't show a savings number for it. Details: plugin-lean/eval/RESULTS.md in the Fleet repo.")
+                    .font(.footnote).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

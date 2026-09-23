@@ -328,6 +328,54 @@ kill_app_tree
 pkill -f "Fixing auth bug\|sleep 800" 2>/dev/null; true
 
 # ---------------------------------------------------------------------------
+section "3h. multi-account — a pane on an extra account really launches with its own login"
+# Each pane dumps its REAL environment to a file. Pane "a" stays on the default
+# login; pane "b" is switched to a freshly added account via the same code path
+# the UI uses (addAccount + setAccount), which must restart it with
+# CLAUDE_CONFIG_DIR / FLEET_ACCOUNT set — and pane "a" must be left alone.
+ENV_A="$TESTROOT/env-a.txt"; ENV_B="$TESTROOT/env-b.txt"
+python3 - > "$APPJSON" <<PYEOF
+import json
+json.dump({"screens": [{"name": "accts", "panes": [
+    {"name": "a", "command": "env > '$ENV_A'; sleep 801", "cwd": "/tmp", "autoNamed": False},
+    {"name": "b", "command": "env > '$ENV_B'; sleep 800", "cwd": "/tmp", "autoNamed": False}
+]}], "power": "Display on"}, open('/dev/stdout', 'w'))
+PYEOF
+launch 6
+# the shell execs its last command in place, so pane a's process IS "sleep 801"
+A_PID_BEFORE=$(pgrep -fx "sleep 801" | head -1)
+ctl() { printf '%s' "$1" > "$CFG_DIR/control.json"; sleep 2; }
+ctl '{"cmd":"addAccount","account":"work","kind":"claude"}'
+rm -f "$ENV_B"
+ctl '{"cmd":"setAccount","name":"accts","pane":"b","account":"work"}'
+sleep 3
+ctl '{"cmd":"dumpState"}'
+ACCT_DIR=$(python3 -c "import json; print(json.load(open('$CFG_DIR/state-dump.json'))['accounts'][0]['configDir'])" 2>/dev/null)
+if [ -n "$ACCT_DIR" ] && [ -d "$ACCT_DIR" ] && [[ "$ACCT_DIR" == "$CFG_DIR/accounts/claude-work-"* ]]; then
+  pass "account created with its own config dir inside the (isolated) fleet config"
+else
+  fail "account dir missing or misplaced: '$ACCT_DIR'"
+fi
+if grep -qx "CLAUDE_CONFIG_DIR=$ACCT_DIR" "$ENV_B" 2>/dev/null && grep -qx "FLEET_ACCOUNT=work" "$ENV_B"; then
+  pass "switched pane restarted with CLAUDE_CONFIG_DIR + FLEET_ACCOUNT for that account"
+else
+  fail "pane b env lacks the account vars: $(grep -E 'CLAUDE_CONFIG_DIR|FLEET_ACCOUNT' "$ENV_B" 2>/dev/null | tr '\n' ' ')"
+fi
+A_PID_AFTER=$(pgrep -fx "sleep 801" | head -1)
+if ! grep -q "^CLAUDE_CONFIG_DIR=\|^FLEET_ACCOUNT=" "$ENV_A" 2>/dev/null && [ -n "$A_PID_BEFORE" ] && [ "$A_PID_BEFORE" = "$A_PID_AFTER" ]; then
+  pass "default-account pane untouched: no account vars, same process (not restarted)"
+else
+  fail "pane a affected (pid $A_PID_BEFORE -> $A_PID_AFTER, or has account vars)"
+fi
+if python3 -c "import json,sys; d=json.load(open('$APPJSON')); p=d['screens'][0]['panes']; sys.exit(0 if p[1].get('accountID')==d['accounts'][0]['id'] and not p[0].get('accountID') else 1)" 2>/dev/null; then
+  pass "account + per-pane assignment persisted to app.json"
+else
+  fail "account assignment not persisted"
+fi
+kill_app_tree
+pkill -f "sleep 80[01]" 2>/dev/null; true
+
+# ---------------------------------------------------------------------------
 section "4. crash resilience (kill -9)"
 p=$(app_pid)
 kill -9 "$p" 2>/dev/null

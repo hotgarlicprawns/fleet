@@ -5,6 +5,8 @@ import SwiftTerm
 /// A single agent session as a real terminal (SwiftTerm PTY).
 struct TerminalPane: NSViewRepresentable {
     let pane: PaneConfig
+    /// The login this pane runs under; nil = the default ~/.claude / ~/.codex.
+    var account: Account? = nil
     @Binding var focusRequest: UUID?
     /// Overrides pane.command for this launch only (used by Resume).
     var command: String? = nil
@@ -39,6 +41,12 @@ struct TerminalPane: NSViewRepresentable {
         // their own sidecars by the exact pane, not by directory/basename —
         // see SessionStats.match's doc comment for why that used to be wrong.
         env.append("FLEET_PANE_ID=\(pane.id.uuidString)")
+        // Per-account login: CLAUDE_CONFIG_DIR / CODEX_HOME, plus
+        // FLEET_ACCOUNT so the HUD sidecar can label rate limits by account.
+        // Stripped first so a value inherited from wherever Fleet was
+        // launched can never leak into a default-account pane.
+        env.removeAll { $0.hasPrefix("CLAUDE_CONFIG_DIR=") || $0.hasPrefix("CODEX_HOME=") || $0.hasPrefix("FLEET_ACCOUNT=") }
+        if let account { env += account.environment }
         if !env.contains(where: { $0.hasPrefix("HOME=") }) {
             env.append("HOME=\(FileManager.default.homeDirectoryForCurrentUser.path)")
         }
