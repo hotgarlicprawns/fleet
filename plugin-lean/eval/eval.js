@@ -21,9 +21,15 @@
  *
  * Usage:
  *   node eval.js [--reps 3] [--model sonnet] [--tasks rename,locate,...]
+ *   node eval.js --repo /path/to/fleet [--reps 3] [--tasks hudRename,hudLocate]
  *   node eval.js --summarize results/<file>.jsonl
  * Writes results/<timestamp>.jsonl (one line per run) and prints a summary.
  * Runs isolate XDG_CONFIG_HOME so they never touch your real savings data.
+ *
+ * --repo runs REPO_TASKS against a real committed snapshot (`git archive
+ * HEAD`) of an actual repo instead of the synthetic fixture above — e.g.
+ * the fleet repo itself. Each run gets its own throwaway extraction; the
+ * real repo is never written to (git archive only reads it).
  */
 
 const fs = require('fs');
@@ -161,6 +167,22 @@ function readTree(dir) {
   return out;
 }
 
+/** Extracts the CURRENT COMMIT of a real repo into `dir` via `git archive`
+ *  — read-only against the source repo (archive never touches the
+ *  worktree or index), so this is safe to point at a real project. Refuses
+ *  a dirty worktree so "the fixture" and "what's actually committed" can't
+ *  silently diverge. */
+function extractRepoSnapshot(repoPath, dir) {
+  const dirty = spawnSync('git', ['status', '--porcelain'], { cwd: repoPath, encoding: 'utf8' });
+  if (dirty.status !== 0) throw new Error(`--repo ${repoPath} is not a git repo`);
+  if (dirty.stdout.trim()) throw new Error(`--repo ${repoPath} has uncommitted changes — commit or stash first so the archived snapshot matches HEAD`);
+  fs.mkdirSync(dir, { recursive: true });
+  const archive = spawnSync('git', ['archive', 'HEAD'], { cwd: repoPath, maxBuffer: 1024 * 1024 * 512 });
+  if (archive.status !== 0) throw new Error(`git archive failed: ${archive.stderr}`);
+  const untar = spawnSync('tar', ['-x', '-C', dir], { input: archive.stdout });
+  if (untar.status !== 0) throw new Error(`tar extract failed: ${untar.stderr}`);
+}
+
 // ---------------------------------------------------------------------------
 // tasks: prompt + expected transformation of the tree (null = no change) +
 // optional answer check. Verification is strict: every file must match.
@@ -189,6 +211,25 @@ const TASKS = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// tasks for --repo mode: a real, modest-size codebase (the fleet repo
+// itself — ~10K lines / 116 tracked files), designed the same way as the
+// synthetic tasks above (exact-transform verification, no fabricated
+// baseline). Picked from real identifiers, checked by hand beforehand to
+// occur ONLY where the task expects (see plugin-lean/eval/README.md).
+// ---------------------------------------------------------------------------
+const REPO_TASKS = {
+  hudRename: {
+    prompt: 'Rename the Swift property `hudInstalled` to `hudActive` everywhere it appears in this project — its declaration and every read/write site. Do not change anything else.',
+    expect: files => mapTree(files, (k, v) => v.split('hudInstalled').join('hudActive')),
+  },
+  hudLocate: {
+    prompt: 'Which Swift file defines the function that re-copies the bundled HUD statusline script over the installed one only if the bytes actually differ? Do not modify any files. Reply with only the relative file path, nothing else.',
+    expect: files => files,
+    answer: out => /app\/Sources\/FleetApp\/HUDManager\.swift/.test(out || ''),
+  },
+};
+
 function verify(task, dir, original, resultText) {
   const expected = task.expect(original);
   const actual = readTree(dir);
@@ -211,12 +252,19 @@ const DISALLOWED = ['Task', 'Agent', 'WebFetch', 'WebSearch', 'CronCreate', 'Cro
   'ReportFindings', 'ScheduleWakeup', 'SendMessage', 'Skill', 'TaskCreate', 'TaskGet', 'TaskList', 'TaskStop',
   'TaskUpdate'];
 
-function runOnce({ taskName, arm, model, rep, tmpRoot, transcriptDir }) {
-  const task = TASKS[taskName];
+function runOnce({ taskName, arm, model, rep, tmpRoot, transcriptDir, repoPath, taskSet }) {
+  const task = taskSet[taskName];
   const dir = fs.mkdtempSync(path.join(tmpRoot, `${taskName}-${arm}-`));
-  const original = buildFixture();
-  writeTree(dir, original);
-  spawnSync('git', ['init', '-q'], { cwd: dir }); // many tools key off a repo root; identical in both arms
+  let original;
+  if (repoPath) {
+    extractRepoSnapshot(repoPath, dir);
+    spawnSync('git', ['init', '-q'], { cwd: dir });
+    original = readTree(dir); // read back what was actually extracted — never assumed
+  } else {
+    original = buildFixture();
+    writeTree(dir, original);
+    spawnSync('git', ['init', '-q'], { cwd: dir }); // many tools key off a repo root; identical in both arms
+  }
 
   const xdg = path.join(tmpRoot, `xdg-${arm}`);
   fs.mkdirSync(xdg, { recursive: true });
@@ -341,8 +389,10 @@ async function main() {
   if (argv.includes('--self-test')) return selfTest();
   const reps = Number(opt('reps', 3));
   const model = opt('model', 'sonnet');
-  const tasks = opt('tasks', Object.keys(TASKS).join(',')).split(',');
-  for (const t of tasks) if (!TASKS[t]) throw new Error(`unknown task ${t}; have ${Object.keys(TASKS).join(', ')}`);
+  const repoPath = opt('repo', null) ? path.resolve(opt('repo', null)) : null;
+  const taskSet = repoPath ? REPO_TASKS : TASKS;
+  const tasks = opt('tasks', Object.keys(taskSet).join(',')).split(',');
+  for (const t of tasks) if (!taskSet[t]) throw new Error(`unknown task ${t}; have ${Object.keys(taskSet).join(', ')}`);
 
   fs.mkdirSync(RESULTS_DIR, { recursive: true });
   const outFile = path.join(RESULTS_DIR, `${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`);
@@ -359,14 +409,15 @@ async function main() {
   const rows = [];
   const transcriptDir = outFile.replace(/\.jsonl$/, '');
   fs.mkdirSync(transcriptDir, { recursive: true });
-  console.error(`fleet-lean eval: ${tasks.length} tasks x 2 arms x ${reps} reps, model ${model}, server ${SERVER_HASH}\n-> ${outFile}`);
+  console.error(`fleet-lean eval: ${tasks.length} tasks x 2 arms x ${reps} reps, model ${model}, server ${SERVER_HASH}` +
+    (repoPath ? `, repo ${repoPath}` : '') + `\n-> ${outFile}`);
   try {
     for (let rep = 1; rep <= reps; rep++) {
       for (const taskName of tasks) {
         // alternate arm order each rep so prompt-cache warmth doesn't systematically favor one arm
         const arms = rep % 2 ? ['baseline', 'lean'] : ['lean', 'baseline'];
         for (const arm of arms) {
-          const row = await runOnce({ taskName, arm, model, rep, tmpRoot, transcriptDir });
+          const row = await runOnce({ taskName, arm, model, rep, tmpRoot, transcriptDir, repoPath, taskSet });
           rows.push(row);
           fs.appendFileSync(outFile, JSON.stringify(row) + '\n');
           console.error(`  rep${rep} ${taskName.padEnd(7)} ${arm.padEnd(8)} ${row.pass ? 'PASS' : 'FAIL'} $${(row.costUSD || 0).toFixed(4)} turns=${row.turns} lean=${row.leanToolCalls} ${row.pass ? '' : row.problems.join('; ')}`);
@@ -415,9 +466,30 @@ function selfTest() {
     }
     const counts = Object.values(orig).join('').split('formatCurrency').length - 1;
     check(counts >= 12, `rename touches many sites (${counts} occurrences)`);
+
+    // --repo mode: extract this actual repo (read-only) and check the
+    // REPO_TASKS transforms/verifier against it — no Claude call, no cost.
+    const repoDir = fs.mkdtempSync(path.join(tmp, 'repo-'));
+    extractRepoSnapshot(path.resolve(PLUGIN_ROOT, '..'), repoDir);
+    const repoOrig = readTree(repoDir);
+    check(Object.keys(repoOrig).length > 50, `real repo snapshot extracted (${Object.keys(repoOrig).length} files)`);
+    const hudFile = 'app/Sources/FleetApp/CockpitStore.swift';
+    check((repoOrig[hudFile] || '').includes('hudInstalled'), 'real repo contains the expected hudInstalled identifier');
+    for (const [name, task] of Object.entries(REPO_TASKS)) {
+      const d = fs.mkdtempSync(path.join(tmp, 'repo-' + name));
+      writeTree(d, task.expect(repoOrig));
+      check(verify(task, d, repoOrig, task.answer ? 'app/Sources/FleetApp/HUDManager.swift' : '').pass, `repo/${name}: expected tree passes`);
+      const d2 = fs.mkdtempSync(path.join(tmp, 'repo-' + name + 'x'));
+      writeTree(d2, repoOrig);
+      check(!verify(task, d2, repoOrig, 'app/Sources/FleetApp/CockpitStore.swift').pass, `repo/${name}: untouched tree fails`);
+    }
+    const hudCount = Object.values(repoOrig).join('').split('hudInstalled').length - 1;
+    check(hudCount >= 6, `hudRename touches multiple real sites (${hudCount} occurrences)`);
+    const hudFiles = Object.entries(repoOrig).filter(([k, v]) => v.includes('hudInstalled')).length;
+    check(hudFiles === 3, `hudInstalled occurs in exactly the 3 known real files (found ${hudFiles})`);
   } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
   process.exitCode = ok ? 0 : 1;
 }
 
 if (require.main === module) main().catch(e => { console.error(e); process.exit(1); });
-module.exports = { buildFixture, TASKS, verify, summarize };
+module.exports = { buildFixture, TASKS, REPO_TASKS, verify, summarize };
