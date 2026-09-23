@@ -24,7 +24,11 @@ enum Hotkey {
     /// Show and focus the main window, un-hiding it if the app was tucked away.
     @MainActor static func summon() {
         NSApp.activate(ignoringOtherApps: true)
-        for w in NSApp.windows where w.canBecomeMain || w.title == "fleet" {
+        // Title-only match: a Settings window also has canBecomeMain == true
+        // (it's a standard NSWindow), so the old `canBecomeMain || title ==
+        // "fleet"` condition would bring Settings forward too whenever the
+        // hotkey fired — the hotkey should only ever summon the main window.
+        for w in NSApp.windows where w.title == "fleet" {
             w.makeKeyAndOrderFront(nil)
         }
     }

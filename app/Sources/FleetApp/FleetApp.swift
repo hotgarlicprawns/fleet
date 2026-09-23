@@ -61,6 +61,10 @@ struct FleetApp: App {
         } label: {
             MenuBarLabel().environmentObject(store)
         }
+
+        Settings {
+            SettingsView().environmentObject(store)
+        }
     }
 }
 

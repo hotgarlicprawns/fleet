@@ -1,6 +1,15 @@
 import SwiftUI
 import AppKit
 
+/// Shared by PaneCell's per-pane rate chips and the toolbar's account-level
+/// rate chips (see the top-bar redesign) — one definition, used both places.
+func fleetRateColor(_ p: Int) -> Color { p >= 90 ? Theme.red : p >= 70 ? Theme.amber : Theme.inkFaint }
+/// "1.2k" for 1234 — matches the same rounding/labeling convention
+/// plugin-lean/report.js's fmt() uses for its own token counts.
+func fleetCompact(_ n: Int) -> String {
+    n >= 1000 ? String(format: "%.1fk", Double(n) / 1000) : String(n)
+}
+
 struct CockpitView: View {
     @EnvironmentObject var store: CockpitStore
     @State private var showingNewScreen = false
@@ -114,14 +123,36 @@ struct CockpitView: View {
 
             Spacer(minLength: 8)
 
-            Segmented(options: PowerManager.Mode.allCases.map { ($0, $0.rawValue) }, selection: $store.powerMode)
-                .help("Native power assertion — no caffeinate, no screen blanking")
+            // Rate limits used to repeat identically on every pane of the
+            // same account (they're account-wide, not per-session), and a
+            // brand-new pane with no reading yet just looked like it
+            // disagreed with the others. One chip per account here instead —
+            // today that's just "default" until multi-account support
+            // exists, but the grouping is already account-aware.
+            ForEach(store.rateByAccount.sorted(by: { $0.key < $1.key }), id: \.key) { key, r in
+                HStack(spacing: 6) {
+                    if key != "default" { Text(key).font(Theme.mono(10, .medium)).foregroundStyle(Theme.inkSoft) }
+                    if let rl5 = r.rl5h { Text("5h \(rl5)%").foregroundStyle(fleetRateColor(rl5)) }
+                    if let rl7 = r.rl7d { Text("7d \(rl7)%").foregroundStyle(fleetRateColor(rl7)) }
+                }
+                .font(Theme.mono(11)).lineLimit(1).fixedSize()
+                .help("Claude Code rate limits for this account")
+            }
 
-            if !store.displays.isEmpty {
-                Chip(options: store.displays.map { ($0.id, shortDisplayName($0)) },
-                     selection: Binding(get: { store.pinnedDisplay ?? store.displays.first?.id ?? 0 },
-                                        set: { store.pinnedDisplay = $0 }))
-                    .help("Pin to this display; falls back if it disappears")
+            // Real, code-computed fleet-lean savings (plugin-lean/report.js's
+            // same numbers) — never a fabricated figure. Hidden entirely if
+            // fleet-lean has never run, rather than showing "0 saved".
+            if let all = store.leanAllTime, all.calls > 0 {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.down.circle").font(.system(size: 10))
+                    if store.leanLive.calls > 0 {
+                        Text("↓\(fleetCompact(store.leanLive.tokens)) tok live")
+                    } else {
+                        Text("↓\(fleetCompact(all.tokens)) tok all-time")
+                    }
+                }
+                .font(Theme.mono(11)).foregroundStyle(Theme.accentInk).lineLimit(1).fixedSize()
+                .help("fleet-lean: \(all.calls) built-in calls avoided all-time (exact), ~\(all.tokens) tokens avoided (est.) — see /fleet-lean-report")
             }
 
             let totalWaiting = store.screens.reduce(0) { $0 + store.waitingCount($1) }
@@ -132,27 +163,16 @@ struct CockpitView: View {
                 .font(Theme.mono(12)).foregroundStyle(Theme.inkFaint).lineLimit(1).fixedSize()
                 .help("Total Claude Code spend in the last 24h")
 
-            Menu {
-                if store.hudInstalled { Button("Turn off HUD") { store.uninstallHUD() } }
-                else { Button("Turn on HUD") { store.installHUD() } }
+            Button {
+                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
             } label: {
-                HStack(spacing: 5) {
-                    Circle().fill(store.hudInstalled ? Theme.accent : Theme.inkFaint).frame(width: 6, height: 6)
-                    Text("HUD").font(Theme.mono(10.5, .medium)).foregroundStyle(Theme.inkFaint)
-                }
-            }.menuStyle(.borderlessButton).fixedSize()
-                .help(store.hudInstalled ? "HUD is on — click to turn off" : "HUD is off — click to turn on")
+                Image(systemName: "gearshape").font(.system(size: 12))
+            }.buttonStyle(.plain).foregroundStyle(Theme.inkSoft)
+                .help("Settings — power mode, display, HUD, license")
         }
         .padding(.horizontal, 16)
         .frame(height: 44)
         .background(Theme.panel)
-    }
-
-    private func shortDisplayName(_ d: DisplayInfo) -> String {
-        var n = d.name
-        n = n.replacingOccurrences(of: " Retina Display", with: "").replacingOccurrences(of: " Display", with: "")
-        if n.count > 16 { n = String(n.prefix(15)) + "…" }
-        return n + (d.isMain ? " ✦" : "")
     }
 
     /// Sync / Push / last-result folded into one menu so the toolbar stays
@@ -540,9 +560,11 @@ private struct PaneCell: View {
             if store.isLocked(pane.id) {
                 lockedPane
             } else {
-                TerminalPane(pane: pane, focusRequest: $store.focusRequest, command: resumeCommand) { code in
+                TerminalPane(pane: pane, focusRequest: $store.focusRequest, command: resumeCommand, onExit: { code in
                     exitCode = code; exited = true
-                }
+                }, onTitle: { title in
+                    store.autoName(pane: pane.id, in: screenID, title: title)
+                })
                 .id("\(pane.id.uuidString)-\(restartToken)")   // bump = fresh PTY
                 .overlay { if exited { restartOverlay } }
             }
@@ -622,14 +644,17 @@ private struct PaneCell: View {
                     .buttonStyle(.plain).font(.system(size: 9)).foregroundStyle(Theme.inkFaint)
                     .help("Close this pane")
             }
-            if let s = stat, (s.costUsd ?? 0) > 0 || (s.ctxPct ?? 0) > 0 || s.rl5h != nil {
+            // Rate limits deliberately don't repeat here — they're
+            // account-wide, so every pane on the same account showed the
+            // identical number, and a pane with no reading yet just looked
+            // like it disagreed with the others. See the toolbar's
+            // account-grouped rate chips instead.
+            if let s = stat, (s.costUsd ?? 0) > 0 || (s.ctxPct ?? 0) > 0 {
                 HStack(spacing: 12) {
                     if let cost = s.costUsd, cost > 0 {
                         statChip("$" + String(format: "%.2f", cost), costColor(cost))
                     }
                     if let ctx = s.ctxPct, ctx > 0 { statChip("ctx \(ctx)%", ctxColor(ctx)) }
-                    if let rl5 = s.rl5h { statChip("5h \(rl5)%", rateColor(rl5)) }
-                    if let rl7 = s.rl7d { statChip("7d \(rl7)%", rateColor(rl7)) }
                     Spacer()
                 }
             }
@@ -643,7 +668,6 @@ private struct PaneCell: View {
         Text(text).font(Theme.mono(9.5, .medium)).foregroundStyle(color)
     }
     private func ctxColor(_ c: Int) -> Color { c >= 85 ? Theme.red : c >= 60 ? Theme.amber : Theme.inkFaint }
-    private func rateColor(_ p: Int) -> Color { p >= 90 ? Theme.red : p >= 70 ? Theme.amber : Theme.inkFaint }
 
     private var dotColor: Color {
         switch stat?.state {

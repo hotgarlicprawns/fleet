@@ -3,21 +3,30 @@
 Run the whole automated suite yourself any time:
 
 ```bash
-./hard-test.sh          # ~12 min. Backs up + restores your app.json and license/trial files.
+./hard-test.sh          # ~12 min. Runs in an isolated temp config dir + its own app
+                        # instance (open -n --env XDG_CONFIG_HOME=...) — never reads or
+                        # writes your real ~/.config/fleet.
 ./soak-test.sh &        # separate instance + config; see its header. `./soak-test.sh stop` ends it.
 ```
 
-Last full run: **50 passed, 0 failed, 1 skipped** (the skip is real UI automation, which
+Last full run: **59 passed, 0 failed, 1 skipped** (the skip is real UI automation, which
 needs Accessibility permission). The suite runs as an entitled "owner" except section 7c,
 which manages entitlement itself; it can't click, so it drives the app through a small
-control file (`~/.config/fleet/control.json`).
+control file (`$XDG_CONFIG_HOME/fleet/control.json`) — including a `dumpState` command that
+writes the toolbar's rollups (account rate limits, fleet-lean savings) to a file for
+assertions the UI-automation section can't reach without Accessibility permission.
 
 Sections: 1 build · 2 config resilience · 3 load (36 idle PTYs) · 3b load (36 panes under
 **sustained heavy continuous output**, not idle — this is the "many terminals actually
 working" scenario, added 2026-09-23 because the original section 3 only proved idle panes
-don't crash) · 4 kill -9 · 5 git worktrees + real remote · 6 polling scale · 7 clean quit ·
-7b close/shrink kills agents · 7d safe worktree cleanup · 7e window hide/summon/hotkey ·
-7c licensing (12 checks incl. live Dodo endpoint) · 8 UI.
+don't crash) · 3c pane-grid identity (growing/shrinking pane count must not kill an
+*untouched* pane's agent — a real bug this found) · 3d per-pane close removes the chosen
+pane, not always the last one · 3e closing to zero screens actually persists as zero ·
+3f top-bar rollups (account-grouped rate limits, real fleet-lean savings, via `dumpState`)
+· 3g auto-naming from a real terminal-title escape sequence, and that a manually-named pane
+is never overwritten · 4 kill -9 · 5 git worktrees + real remote · 6 polling scale ·
+7 clean quit · 7b close/shrink kills agents · 7d safe worktree cleanup ·
+7e window hide/summon/hotkey · 7c licensing (12 checks incl. live Dodo endpoint) · 8 UI.
 
 **Known unexplained flake:** in one full run, 7e failed four checks (no visible window, pane
 never spawned) and then passed on every rerun — alone, after 7d, and in two more full runs,
@@ -45,7 +54,7 @@ again, `/tmp/fleet-7e-fail.log` holds the app log.
 | Sync / Push | real fetch+rebase+push against a real (local) remote | both succeed — the git plumbing itself is sound, independent of the app UI |
 | Config corruption | invalid JSON in app.json | falls back to defaults instead of crashing |
 
-## Two real bugs this found (already fixed)
+## Real bugs this found (already fixed)
 
 1. **O(panes × sessions) polling.** The cost/context HUD lookup re-scanned
    the whole `~/.config/fleet/sessions/` folder once *per pane* every 3s.
@@ -59,6 +68,40 @@ again, `/tmp/fleet-7e-fail.log` holds the app log.
    env assignment (`npm i && npm run dev`, a one-liner test command) failed
    silently with exit 127. Fixed by dropping the `exec` and running the
    command as the shell's last statement instead, which handles any shape.
+3. **P0: changing pane count could silently kill a DIFFERENT pane's agent.**
+   The pane grid nested a VStack/HStack ForEach keyed by row *offset*,
+   recomputed from pane count (columns = ceil(√n)). Growing or shrinking a
+   screen's pane count changes the column count, moving panes between rows
+   — SwiftUI saw a moved pane as leaving one HStack and appearing in a
+   different one, tore down its TerminalPane, and killed that pane's whole
+   process group. Fixed with a flat `Layout` keyed by `pane.id` — see
+   section 3c.
+4. **The real `~/.config/fleet/app.json` had a leftover test fixture in
+   it** (screen "s", three permanently-sleeping panes) — the earlier
+   version of this suite backed up and restored `app.json` in place rather
+   than using an isolated config, and an interrupted run left the fixture
+   behind. That screen swallowed every keystroke forever — exactly what a
+   "dead, unwritable screen" bug report looks like. This suite now runs
+   fully isolated (see the `hard-test.sh` header above) so this can't
+   happen again.
+5. **Two more causes of the same "dead screen" symptom**: nothing set
+   keyboard focus at launch, and switching screens only ever toggled
+   `activeScreenID` (visibility) without ever moving AppKit's first
+   responder — so keystrokes kept going to the previous, now-invisible
+   screen. Both fixed; see `CockpitStore.select(_:)`.
+6. **The screen close button was invisible whenever you had only one
+   screen** (`hover && screens.count > 1`), with no explanation — read
+   as "the close button doesn't work." And the ONLY pane-removal control
+   was a stepper that always dropped whichever pane was *last*, never the
+   one you were looking at. Both fixed: the screen close button always
+   shows now, and each pane has its own close button (section 3d).
+7. **5h/7d rate limits showed "0%" on a brand-new pane** that simply hadn't
+   reported yet, indistinguishable from "genuinely 0% used" — and sidecars
+   were matched to panes by directory, so two panes in the same folder
+   always showed identical numbers and a new pane could inherit a stale
+   reading from an unrelated session. Fixed: missing fields are now `null`,
+   not `0`, and matching is by a real per-pane id (`FLEET_PANE_ID`) instead
+   of directory.
 
 ## What you should test by hand (needs real clicking)
 

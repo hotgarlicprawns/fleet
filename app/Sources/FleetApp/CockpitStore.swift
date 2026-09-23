@@ -6,11 +6,22 @@ struct PaneConfig: Identifiable, Codable, Equatable {
     var name: String
     var command: String
     var cwd: String
+    /// Whether this pane's name may still be auto-updated from the
+    /// terminal's own title (Claude Code sets one via the standard xterm
+    /// OSC title escape once real work starts). A manual rename turns this
+    /// off permanently for that pane — auto-naming never fights a name you
+    /// chose yourself.
+    var autoNamed: Bool = true
 
-    enum CodingKeys: String, CodingKey { case id, name, command, cwd }
+    enum CodingKeys: String, CodingKey { case id, name, command, cwd, autoNamed }
 
     init(name: String, command: String, cwd: String) {
         self.name = name; self.command = command; self.cwd = cwd
+        // A default-shaped name ("pane 0", "claude 2", …) is still fair
+        // game for auto-naming; anything else was presumably already
+        // chosen deliberately (e.g. a saved config from before this
+        // existed) and shouldn't be overwritten out from under someone.
+        self.autoNamed = PaneConfig.looksDefaultNamed(name)
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -18,6 +29,11 @@ struct PaneConfig: Identifiable, Codable, Equatable {
         name = try c.decode(String.self, forKey: .name)
         command = (try? c.decode(String.self, forKey: .command)) ?? "claude"
         cwd = (try? c.decode(String.self, forKey: .cwd)) ?? FileManager.default.homeDirectoryForCurrentUser.path
+        autoNamed = (try? c.decode(Bool.self, forKey: .autoNamed)) ?? PaneConfig.looksDefaultNamed(name)
+    }
+
+    static func looksDefaultNamed(_ name: String) -> Bool {
+        name.range(of: #"^(pane|claude|codex) \d+$"#, options: .regularExpression) != nil
     }
 }
 
@@ -83,6 +99,9 @@ final class CockpitStore: ObservableObject {
     @Published var displays: [DisplayInfo] = []
     @Published var pinnedDisplay: CGDirectDisplayID? { didSet { moveWindow(); persist() } }
     @Published var totalToday: Double = 0
+    @Published var rateByAccount: [String: SessionStats.RateReading] = [:]
+    @Published var leanLive: (calls: Int, tokens: Int) = (0, 0)
+    @Published var leanAllTime: (calls: Int, tokens: Int, days: Int)?
     @Published var focusRequest: UUID?
     /// screen id -> the pane maximized within it, if any. Transient (not
     /// persisted) — a fresh launch always starts with the normal grid.
@@ -327,7 +346,42 @@ final class CockpitStore: ObservableObject {
         guard let si = screens.firstIndex(where: { $0.id == screenID }),
               let pi = screens[si].panes.firstIndex(where: { $0.id == id }) else { return }
         screens[si].panes[pi].name = name.isEmpty ? screens[si].panes[pi].name : name
+        screens[si].panes[pi].autoNamed = false // a manual rename always wins from here on
         persist()
+    }
+
+    /// Cleans a raw terminal-title string (spinner glyphs, braille frames,
+    /// generic "claude"/"codex" chrome) and applies it as the pane's name —
+    /// but only if this pane hasn't been manually renamed, and only if the
+    /// cleaned result actually differs from its current name (title updates
+    /// fire on nearly every render; comparing after cleaning avoids
+    /// thrashing persist() on every spinner frame).
+    func autoName(pane id: UUID, in screenID: UUID, title: String) {
+        guard let si = screens.firstIndex(where: { $0.id == screenID }),
+              let pi = screens[si].panes.firstIndex(where: { $0.id == id }),
+              screens[si].panes[pi].autoNamed
+        else { return }
+        guard let cleaned = Self.cleanTerminalTitle(title), cleaned != screens[si].panes[pi].name else { return }
+        screens[si].panes[pi].name = cleaned
+        persist()
+    }
+
+    static func cleanTerminalTitle(_ raw: String) -> String? {
+        // Strip leading spinner glyphs (✳ ✻ · and the braille block used by
+        // several CLI spinners, U+2800–28FF) and surrounding whitespace.
+        var s = raw
+        while let f = s.unicodeScalars.first,
+              CharacterSet(charactersIn: "✳✻·-").contains(f) || (0x2800...0x28FF).contains(Int(f.value)) {
+            s.removeFirst()
+        }
+        s = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard s.count >= 3 else { return nil }
+        let lower = s.lowercased()
+        if ["claude", "claude code", "codex"].contains(lower) { return nil }
+        // Looks like a bare path or a user@host prompt string, not a real title.
+        if s.hasPrefix("/") || s.hasPrefix("~") || s.contains("@") { return nil }
+        if s.count > 28 { s = String(s.prefix(27)) + "…" }
+        return s
     }
 
     /// Switches the active screen AND moves keyboard focus into it — the one
@@ -494,6 +548,20 @@ final class CockpitStore: ObservableObject {
         case "summon": Hotkey.summon()
         case "showUpgrade": upgradeReason = o["reason"] as? String ?? ""; showUpgrade = true
         case "showReport": showReport = true
+        case "dumpState":
+            // Internal test hook — writes the toolbar rollups to a file the
+            // hard-test suite can read, since there's no UI automation for
+            // them (the "8. UI automation" section needs Accessibility
+            // permission and is usually skipped in CI).
+            let rates = rateByAccount.mapValues { ["rl5h": $0.rl5h as Any, "rl7d": $0.rl7d as Any] }
+            let obj: [String: Any] = [
+                "rateByAccount": rates,
+                "leanLiveCalls": leanLive.calls, "leanLiveTokens": leanLive.tokens,
+                "leanAllTimeCalls": leanAllTime?.calls ?? 0, "leanAllTimeTokens": leanAllTime?.tokens ?? 0
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted]) {
+                try? data.write(to: configDir.appendingPathComponent("state-dump.json"))
+            }
         case "windowState":
             let w = NSApp.windows.first(where: { $0.title == "fleet" })
             flog("windowState: visible=\(w?.isVisible ?? false) id=\(w?.windowNumber ?? 0) app=running all=\(NSApp.windows.map { "\($0.title.isEmpty ? "-" : $0.title):\($0.isVisible ? "v" : "h"):\(type(of: $0))" })")
@@ -561,10 +629,17 @@ final class CockpitStore: ObservableObject {
             var map: [UUID: SessionStat] = [:]
             for id in paneIDs { if let s = SessionStats.match(recent, paneID: id) { map[id] = s } }
             let total = SessionStats.totalCostToday(day)
+            let rates = SessionStats.rateByAccount(recent)
+            let claudePids = Set(map.values.compactMap { $0.claudePid })
+            let live = LeanSavings.liveTotals(claudePids: claudePids)
+            let allTime = LeanSavings.allTimeTotals()
             if prune { SessionStats.pruneOlderThan(days: 30) }
             await MainActor.run {
                 self.statByPane = map
                 self.totalToday = total
+                self.rateByAccount = rates
+                self.leanLive = live
+                self.leanAllTime = allTime
             }
         }
     }
@@ -589,8 +664,11 @@ final class CockpitStore: ObservableObject {
     }
 
     func moveWindow() {
+        // Match by title, not just "any visible window" — now that a
+        // Settings window exists, changing the display pin FROM Settings
+        // would otherwise move the Settings window instead of the main one.
         guard let pinned = pinnedDisplay,
-              let window = NSApp.windows.first(where: { $0.isVisible }),
+              let window = NSApp.windows.first(where: { $0.isVisible && $0.title == "fleet" }),
               let screen = NSScreen.screens.first(where: {
                   ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == pinned
               })

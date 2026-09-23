@@ -9,11 +9,18 @@ struct TerminalPane: NSViewRepresentable {
     /// Overrides pane.command for this launch only (used by Resume).
     var command: String? = nil
     var onExit: @MainActor @Sendable (Int32?) -> Void = { _ in }
+    /// Fires on every terminal-title change (standard xterm OSC 0/1/2
+    /// escape sequences — SwiftTerm already parses these; this just wires
+    /// the callback that was previously stubbed empty). Claude Code sets
+    /// one via this exact mechanism; verified directly against SwiftTerm's
+    /// own escape-sequence handling with a raw OSC sequence, not assumed.
+    var onTitle: @MainActor @Sendable (String) -> Void = { _ in }
 
-    func makeCoordinator() -> Coordinator { Coordinator(onExit: onExit) }
+    func makeCoordinator() -> Coordinator { Coordinator(onExit: onExit, onTitle: onTitle) }
 
     func makeNSView(context: Context) -> LocalProcessTerminalView {
         context.coordinator.onExit = onExit
+        context.coordinator.onTitle = onTitle
         let term = LocalProcessTerminalView(frame: .zero)
         term.processDelegate = context.coordinator
         term.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -62,6 +69,7 @@ struct TerminalPane: NSViewRepresentable {
 
     func updateNSView(_ nsView: LocalProcessTerminalView, context: Context) {
         context.coordinator.onExit = onExit
+        context.coordinator.onTitle = onTitle
         if focusRequest == pane.id {
             nsView.window?.makeFirstResponder(nsView)
             DispatchQueue.main.async { self.focusRequest = nil }
@@ -70,10 +78,17 @@ struct TerminalPane: NSViewRepresentable {
 
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
         var onExit: @MainActor @Sendable (Int32?) -> Void
-        init(onExit: @escaping @MainActor @Sendable (Int32?) -> Void) { self.onExit = onExit }
+        var onTitle: @MainActor @Sendable (String) -> Void
+        init(onExit: @escaping @MainActor @Sendable (Int32?) -> Void,
+             onTitle: @escaping @MainActor @Sendable (String) -> Void) {
+            self.onExit = onExit; self.onTitle = onTitle
+        }
 
         func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
-        func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
+        func setTerminalTitle(source: LocalProcessTerminalView, title: String) {
+            let handler = onTitle
+            Task { @MainActor in handler(title) }
+        }
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
         func processTerminated(source: TerminalView, exitCode: Int32?) {
             flog("processTerminated exit=\(String(describing: exitCode))")

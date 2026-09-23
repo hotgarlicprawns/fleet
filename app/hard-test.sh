@@ -248,6 +248,86 @@ kill_app_tree
 pkill -f "sleep 900" 2>/dev/null; true
 
 # ---------------------------------------------------------------------------
+section "3f. top-bar rollups — account-grouped rate limits, real fleet-lean savings"
+PANE_ID="AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+python3 - > "$APPJSON" <<PYEOF
+import json
+json.dump({"screens": [{"name": "rollup", "panes": [
+    {"id": "$PANE_ID", "name": "p0", "command": "sleep 800", "cwd": "/tmp"}
+]}], "power": "Display on"}, open('/dev/stdout', 'w'))
+PYEOF
+launch 6
+mkdir -p "$CFG_DIR/sessions"
+NOW=$(date +%s)
+# Real HUD sidecar for that exact pane, with an account tag and real rate limits.
+cat > "$CFG_DIR/sessions/rolluptest.json" <<EOF
+{"sessionId":"rolluptest","claudePid":424242,"hudVersion":2,"fleetPaneId":"$PANE_ID","account":"work","configDir":"","dir":"/tmp","model":"Sonnet","costUsd":1.0,"ctxPct":10,"rl5h":42,"rl7d":7,"linesAdded":0,"linesRemoved":0,"attention":false,"state":"working","firstSeen":$NOW,"updated":$NOW}
+EOF
+# Real fleet-lean sidecar sharing that same claudePid.
+cat > "$CFG_DIR/sessions/rolluptest.lean.json" <<EOF
+{"runId":"rolluptest","pid":1,"claudePid":424242,"calls":[{"tool":"lean_search","callsAvoided":5,"estTokensAvoided":2500}]}
+EOF
+# Real all-time rollup (same shape as plugin-lean writes).
+cat > "$CFG_DIR/lean-savings.json" <<EOF
+{"days":{"2026-01-01":{"calls":3,"callsAvoided":9,"estTokens":300,"estTokensAvoided":4000}}}
+EOF
+sleep 4   # let a poll cycle (every 3s) pick all of this up
+ctl() { printf '%s' "$1" > "$CFG_DIR/control.json"; sleep 2; }
+ctl '{"cmd":"dumpState"}'
+DUMP="$CFG_DIR/state-dump.json"
+if [ -f "$DUMP" ]; then
+  python3 -c "
+import json
+d = json.load(open('$DUMP'))
+assert d['rateByAccount']['work']['rl5h'] == 42, d
+assert d['rateByAccount']['work']['rl7d'] == 7, d
+assert d['leanLiveCalls'] == 5, d
+assert d['leanLiveTokens'] == 2500, d
+assert d['leanAllTimeCalls'] == 9, d
+assert d['leanAllTimeTokens'] == 4000, d
+print('ok')
+" && pass "account-grouped rate limits and real fleet-lean savings both roll up correctly" \
+    || fail "rollup values wrong — see $DUMP"
+else
+  fail "dumpState never wrote $DUMP"
+fi
+kill_app_tree
+pkill -f "sleep 800" 2>/dev/null; true
+
+# ---------------------------------------------------------------------------
+section "3g. auto-naming — a real terminal-title escape sequence renames the pane"
+# Sends a REAL xterm OSC-2 title escape sequence (the exact mechanism Claude
+# Code uses to set its own terminal title) through each pane's shell, proving
+# the setTerminalTitle -> onTitle -> autoName -> persist wiring actually
+# fires end-to-end — not just that it compiles. Pane B starts pre-marked
+# autoNamed:false (as if manually renamed already) to prove a real title
+# update never overwrites a name the user chose.
+python3 - > "$APPJSON" <<'PYEOF'
+import json
+title_cmd = "printf '\\033]2;Fixing auth bug\\007'; sleep 800"
+json.dump({"screens": [{"name": "autoname", "panes": [
+    {"name": "pane 0", "command": title_cmd, "cwd": "/tmp"},
+    {"name": "my chosen name", "command": title_cmd, "cwd": "/tmp", "autoNamed": False}
+]}], "power": "Display on"}, open('/dev/stdout', 'w'))
+PYEOF
+launch 6
+sleep 2
+NAME_A=$(python3 -c "import json; print(json.load(open('$APPJSON'))['screens'][0]['panes'][0]['name'])" 2>/dev/null)
+NAME_B=$(python3 -c "import json; print(json.load(open('$APPJSON'))['screens'][0]['panes'][1]['name'])" 2>/dev/null)
+if [ "$NAME_A" = "Fixing auth bug" ]; then
+  pass "pane auto-renamed from its real terminal title escape sequence"
+else
+  fail "expected pane renamed to 'Fixing auth bug', got: '$NAME_A'"
+fi
+if [ "$NAME_B" = "my chosen name" ]; then
+  pass "a pane marked autoNamed:false is never overwritten despite a real title update"
+else
+  fail "manually-named pane was overwritten: '$NAME_B'"
+fi
+kill_app_tree
+pkill -f "Fixing auth bug\|sleep 800" 2>/dev/null; true
+
+# ---------------------------------------------------------------------------
 section "4. crash resilience (kill -9)"
 p=$(app_pid)
 kill -9 "$p" 2>/dev/null

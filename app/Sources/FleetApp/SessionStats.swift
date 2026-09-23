@@ -85,4 +85,84 @@ enum SessionStats {
             try? FileManager.default.removeItem(at: url)
         }
     }
+
+    /// Most-recent reading per account key ("account", falling back to
+    /// "configDir", falling back to "default"). Rate limits are account-wide
+    /// percentages already — taking the latest reading per account, never a
+    /// sum, is the only sound rollup (summing two panes on the same account
+    /// would double-count the same percentage).
+    struct RateReading { var rl5h: Int?; var rl7d: Int?; var updated: Double }
+    static func rateByAccount(_ stats: [SessionStat]) -> [String: RateReading] {
+        var out: [String: RateReading] = [:]
+        for s in stats where s.rl5h != nil || s.rl7d != nil {
+            let key = (s.account?.isEmpty == false ? s.account : nil)
+                ?? (s.configDir?.isEmpty == false ? s.configDir : nil) ?? "default"
+            let updated = s.updated ?? 0
+            if let existing = out[key], existing.updated >= updated { continue }
+            out[key] = RateReading(rl5h: s.rl5h, rl7d: s.rl7d, updated: updated)
+        }
+        return out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fleet-lean savings — real, code-computed numbers already written by the
+// fleet-lean MCP server (plugin-lean/server/index.js) and its report.js.
+// This reads the exact same files/fields; it does not recompute anything
+// differently or invent a number report.js wouldn't also show.
+// ---------------------------------------------------------------------------
+
+private struct LeanCall: Decodable {
+    var callsAvoided: Int?
+    var estTokensAvoided: Int?
+}
+private struct LeanSidecar: Decodable {
+    var claudePid: Int?
+    var calls: [LeanCall]?
+}
+
+enum LeanSavings {
+    /// "Live" — the sum across every *.lean.json sidecar matching a pane
+    /// Fleet currently knows about (by claudePid, from that pane's already-
+    /// matched HUD SessionStat — a lean sidecar has no fleetPaneId of its
+    /// own yet). Sums real per-call numbers already computed by the server;
+    /// never recomputed or estimated differently here.
+    static func liveTotals(claudePids: Set<Int>) -> (calls: Int, tokens: Int) {
+        guard !claudePids.isEmpty,
+              let items = try? FileManager.default.contentsOfDirectory(at: SessionStats.dir, includingPropertiesForKeys: nil)
+        else { return (0, 0) }
+        var calls = 0, tokens = 0
+        for url in items where url.lastPathComponent.hasSuffix(".lean.json") {
+            guard let data = try? Data(contentsOf: url),
+                  let side = try? JSONDecoder().decode(LeanSidecar.self, from: data),
+                  let pid = side.claudePid, claudePids.contains(pid)
+            else { continue }
+            for c in side.calls ?? [] {
+                calls += c.callsAvoided ?? 0
+                tokens += c.estTokensAvoided ?? 0
+            }
+        }
+        return (calls, tokens)
+    }
+
+    /// All-time on this machine — identical to plugin-lean/report.js's
+    /// allTimeRollup(): sum callsAvoided/estTokensAvoided across every day
+    /// bucket in lean-savings.json. Deliberately no "today" figure — that
+    /// rollup buckets by UTC day, so "today" would be wrong for most
+    /// timezones (see report.js's own comment on this).
+    static func allTimeTotals() -> (calls: Int, tokens: Int, days: Int)? {
+        let base = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"].map(URL.init(fileURLWithPath:))
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config")
+        let url = base.appendingPathComponent("fleet/lean-savings.json")
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let days = obj["days"] as? [String: [String: Any]]
+        else { return nil }
+        var calls = 0, tokens = 0
+        for (_, bucket) in days {
+            calls += (bucket["callsAvoided"] as? Int) ?? 0
+            tokens += (bucket["estTokensAvoided"] as? Int) ?? 0
+        }
+        return (calls, tokens, days.count)
+    }
 }
