@@ -10,16 +10,37 @@ Negative "saves" means fleet-lean cost **more** than plain Claude Code.
 | v1 (1 rep) | MCP `instructions` telling the model the tools exist (Claude Code defers MCP tools behind ToolSearch, showing only names) | used | **−80%** | −33% | 0/4 |
 | v2 | `lean_edit` accepts any fragment like the built-in Edit (was whole lines only — the model's natural `find` failed, costing ~6 turns), `replaceAll`, grep-style text output instead of JSON | used | **−51%** | −50% | 3/12 |
 | v3 | explicit "complete" footer (the old "10 of 20 files matched" read as truncated, so the model re-ran grep to double-check) + "don't re-verify" guidance | used | **−11%** | +2% | 2/12 |
+| v4 (real repo) | same server as v3, but run with `--repo` against a real committed snapshot of the fleet repo itself (2 tasks: rename a real Swift property across 3 files, locate a real function by behavior) instead of the synthetic fixture | used | **+8%** aggregate, but **−18%** with one outlier excluded (see below) | −25% aggregate | 2/6 |
 
-Raw rows: `results/v2.jsonl` (server 5e24ad528587), `results/v3.jsonl`
-(server 5fe3637dc681), plus full transcripts in `results/v*-transcripts/` and
-the smoke runs in `results/early/`. Re-summarize any of them with
-`node eval.js --summarize <file>`.
+Raw rows: `results/v2.jsonl` (server 5e24ad528587), `results/v3.jsonl` and
+`results/v4-repo.jsonl` (server 5fe3637dc681), plus full transcripts in
+`results/v*-transcripts/` and the smoke runs in `results/early/`.
+Re-summarize any of them with `node eval.js --summarize <file>`.
+
+### v4 detail: real repo, real outlier
+
+`node eval.js --repo <path-to-fleet> --reps 3` runs `REPO_TASKS` against
+`git archive HEAD` of an actual repo (this eval harness's own source is
+stripped from the snapshot first, since its task prompts mention the real
+identifier under test and would otherwise contaminate the ground truth —
+see `extractRepoSnapshot` in `eval.js`).
+
+The raw aggregate says lean saved 8.4% — look at the per-task table instead
+and it's the opposite: **lean's median cost is higher in both tasks**
+(hudRename: $0.055 baseline vs $0.060 lean; hudLocate: $0.046 vs $0.059),
+and lean only won 2 of 6 paired runs. The aggregate is entirely produced by
+one baseline run (`hudRename` rep 2) hitting a `sed -i '' -E` quoting quirk
+on this machine, falling back to individual Edit calls, and taking 14 turns
+instead of ~4 — a shell environment fluke in the baseline arm, not anything
+fleet-lean fixed. Excluding that one run: baseline $0.247 vs lean $0.292
+over the remaining 5 pairs — **lean costs 18% more**, consistent with v2/v3.
 
 ## Conclusion
 
 **fleet-lean does not save money against current Claude Code.** At its
-best (v3), it matches baseline on turns and still costs ~11% more.
+best (v3, synthetic repo), it matches baseline on turns and still costs
+~11% more. Re-run against a real repo — Fleet's own — v4 confirms it: once
+a same-arm shell-quirk outlier is set aside, lean costs ~18% more there too.
 
 Why, from the transcripts:
 

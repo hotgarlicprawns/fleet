@@ -5,6 +5,7 @@
 ```bash
 node eval.js --self-test            # checks the harness itself, costs nothing
 node eval.js --reps 3               # 4 tasks x 2 arms x 3 reps = 24 real runs (~$1.5 list price, ~15 min)
+node eval.js --repo /path/to/repo   # same idea, against a REAL repo's committed snapshot instead of the synthetic fixture
 node eval.js --summarize results/<file>.jsonl
 ```
 
@@ -31,10 +32,19 @@ node eval.js --summarize results/<file>.jsonl
   touch your real savings data; full transcripts are saved next to each
   results file for inspection.
 
-Tasks: `rename` (identifier across 10 files, 26 sites), `retry` (one constant
-in a large file, with a same-valued decoy next to it), `prefix` (string
-literal across a directory tree), `locate` (find a function by what it does,
-not its name).
+Tasks (synthetic fixture): `rename` (identifier across 10 files, 26 sites),
+`retry` (one constant in a large file, with a same-valued decoy next to it),
+`prefix` (string literal across a directory tree), `locate` (find a function
+by what it does, not its name).
+
+Tasks (`--repo` mode, `REPO_TASKS`): `hudRename` (a real Swift property
+renamed across 3 real files), `hudLocate` (find a real function by behavior).
+`--repo` archives `git HEAD` of the given repo (read-only against it — never
+touches its worktree) and strips this eval's own source from the snapshot
+first, since a task prompt naming a real identifier would otherwise match
+inside the eval tool too and contaminate the ground truth. The target repo
+must be committed clean (dirty worktree is refused) so the archived snapshot
+matches what `expect()` was written against.
 
 ## Results
 
