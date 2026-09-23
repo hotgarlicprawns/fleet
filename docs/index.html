@@ -279,7 +279,6 @@
     <nav>
       <a href="#screens">Screens</a>
       <a href="#hud">The HUD</a>
-      <a href="#how">How it works</a>
       <a href="#modes">Power modes</a>
       <a href="#pricing">Pricing</a>
       <a href="#install">Install</a>
@@ -416,35 +415,6 @@
   </div>
 </section>
 
-<section id="how">
-  <div class="wrap">
-    <div class="sec-head">
-      <div class="eyebrow">The problem</div>
-      <h2>Three things break when you run Claude Code for hours.</h2>
-      <p>Windows scatter across the desktop. The Mac sleeps mid-task. And every
-      screen-blanking trick on an office laptop with a dead built-in panel
-      re-shuffles your external monitors. fleet fixes each one.</p>
-    </div>
-    <div class="feat">
-      <div>
-        <div class="tag">01 · tile</div>
-        <h3>One tiled grid</h3>
-        <p>The app tiles real terminals per screen. Prefer tmux? <span class="mono">fleet up</span> builds the same grid there, and survives a disconnect.</p>
-      </div>
-      <div>
-        <div class="tag">02 · stay awake</div>
-        <h3>Long runs don't sleep</h3>
-        <p>The app holds a native power assertion while Display on or System awake is selected — released the instant Fleet quits, even if it crashes.</p>
-      </div>
-      <div>
-        <div class="tag">03 · dark screen</div>
-        <h3>Blank, not rearranged</h3>
-        <p>Fleet never re-arranges your monitors. The window pins to a display of your choice and falls back if that display disappears — the dead-laptop-panel case.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
 <section id="modes">
   <div class="wrap">
     <div class="sec-head">
@@ -463,6 +433,7 @@
         </tbody>
       </table>
     </div>
+    <p class="note">The power assertion is released the instant Fleet quits, even if it crashes — no leftover <span class="mono">caffeinate</span> process. Screens pin to a display of your choice and fall back automatically if that display disappears (a dead laptop panel, an unplugged monitor).</p>
   </div>
 </section>
 
