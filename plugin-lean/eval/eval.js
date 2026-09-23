@@ -221,7 +221,11 @@ const TASKS = {
 const REPO_TASKS = {
   hudRename: {
     prompt: 'Rename the Swift property `hudInstalled` to `hudActive` everywhere it appears in this project — its declaration and every read/write site. Do not change anything else.',
-    expect: files => mapTree(files, (k, v) => v.split('hudInstalled').join('hudActive')),
+    // Restricted to *.swift: the repo snapshot includes this eval harness's
+    // own source, which mentions "hudInstalled" in this very prompt string —
+    // a blind whole-tree replace would rewrite that non-Swift, non-identifier
+    // occurrence too, which isn't what a correct answer would do.
+    expect: files => mapTree(files, (k, v) => k.endsWith('.swift') ? v.split('hudInstalled').join('hudActive') : v),
   },
   hudLocate: {
     prompt: 'Which Swift file defines the function that re-copies the bundled HUD statusline script over the installed one only if the bytes actually differ? Do not modify any files. Reply with only the relative file path, nothing else.',
@@ -258,6 +262,11 @@ function runOnce({ taskName, arm, model, rep, tmpRoot, transcriptDir, repoPath, 
   let original;
   if (repoPath) {
     extractRepoSnapshot(repoPath, dir);
+    // Strip this eval harness's own source from the snapshot the AGENT sees —
+    // its task prompts mention real identifiers (e.g. "hudInstalled"), so
+    // leaving it in would let the model "correctly" find and edit a match
+    // inside the eval tool itself, contaminating the ground truth.
+    fs.rmSync(path.join(dir, 'plugin-lean', 'eval'), { recursive: true, force: true });
     spawnSync('git', ['init', '-q'], { cwd: dir });
     original = readTree(dir); // read back what was actually extracted — never assumed
   } else {
@@ -471,6 +480,7 @@ function selfTest() {
     // REPO_TASKS transforms/verifier against it — no Claude call, no cost.
     const repoDir = fs.mkdtempSync(path.join(tmp, 'repo-'));
     extractRepoSnapshot(path.resolve(PLUGIN_ROOT, '..'), repoDir);
+    fs.rmSync(path.join(repoDir, 'plugin-lean', 'eval'), { recursive: true, force: true }); // see runOnce's matching strip
     const repoOrig = readTree(repoDir);
     check(Object.keys(repoOrig).length > 50, `real repo snapshot extracted (${Object.keys(repoOrig).length} files)`);
     const hudFile = 'app/Sources/FleetApp/CockpitStore.swift';
@@ -484,9 +494,9 @@ function selfTest() {
       check(!verify(task, d2, repoOrig, 'app/Sources/FleetApp/CockpitStore.swift').pass, `repo/${name}: untouched tree fails`);
     }
     const hudCount = Object.values(repoOrig).join('').split('hudInstalled').length - 1;
-    check(hudCount >= 6, `hudRename touches multiple real sites (${hudCount} occurrences)`);
+    check(hudCount === 6, `hudRename touches exactly the 6 known real sites (found ${hudCount})`);
     const hudFiles = Object.entries(repoOrig).filter(([k, v]) => v.includes('hudInstalled')).length;
-    check(hudFiles === 3, `hudInstalled occurs in exactly the 3 known real files (found ${hudFiles})`);
+    check(hudFiles === 3, `hudInstalled occurs in exactly the 3 known real Swift files (found ${hudFiles})`);
   } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
   process.exitCode = ok ? 0 : 1;
 }
