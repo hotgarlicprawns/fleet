@@ -173,9 +173,15 @@ function readTree(dir) {
  *  a dirty worktree so "the fixture" and "what's actually committed" can't
  *  silently diverge. */
 function extractRepoSnapshot(repoPath, dir) {
-  const dirty = spawnSync('git', ['status', '--porcelain'], { cwd: repoPath, encoding: 'utf8' });
+  // Excludes this eval's own results/ output: running the eval writes new
+  // result files INTO the very repo it's archiving from (results are
+  // sometimes deliberately committed as evidence), which would otherwise
+  // make every run after the first see the repo as "dirty" because of the
+  // previous run's own output.
+  const dirty = spawnSync('git', ['status', '--porcelain', '--', '.', ':!plugin-lean/eval/results'],
+    { cwd: repoPath, encoding: 'utf8' });
   if (dirty.status !== 0) throw new Error(`--repo ${repoPath} is not a git repo`);
-  if (dirty.stdout.trim()) throw new Error(`--repo ${repoPath} has uncommitted changes — commit or stash first so the archived snapshot matches HEAD`);
+  if (dirty.stdout.trim()) throw new Error(`--repo ${repoPath} has uncommitted changes — commit or stash first so the archived snapshot matches HEAD:\n${dirty.stdout}`);
   fs.mkdirSync(dir, { recursive: true });
   const archive = spawnSync('git', ['archive', 'HEAD'], { cwd: repoPath, maxBuffer: 1024 * 1024 * 512 });
   if (archive.status !== 0) throw new Error(`git archive failed: ${archive.stderr}`);
