@@ -508,4 +508,7 @@ function selfTest() {
 }
 
 if (require.main === module) main().catch(e => { console.error(e); process.exit(1); });
-module.exports = { buildFixture, TASKS, REPO_TASKS, verify, summarize };
+module.exports = {
+  buildFixture, TASKS, REPO_TASKS, verify, summarize,
+  writeTree, readTree, extractRepoSnapshot, DISALLOWED, median, sum, totalTok,
+};

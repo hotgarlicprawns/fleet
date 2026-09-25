@@ -9,7 +9,7 @@ Run the whole automated suite yourself any time:
 ./soak-test.sh &        # separate instance + config; see its header. `./soak-test.sh stop` ends it.
 ```
 
-Last full run: **63 passed, 0 failed, 1 skipped** (the skip is real UI automation, which
+Last full run: **65 passed, 0 failed, 1 skipped** (the skip is real UI automation, which
 needs Accessibility permission). The suite runs as an entitled "owner" except section 7c,
 which manages entitlement itself; it can't click, so it drives the app through a small
 control file (`$XDG_CONFIG_HOME/fleet/control.json`) — including a `dumpState` command that
@@ -26,7 +26,9 @@ pane, not always the last one · 3e closing to zero screens actually persists as
 · 3g auto-naming from a real terminal-title escape sequence, and that a manually-named pane
 is never overwritten · 3h multi-account: a pane switched to an extra account really restarts
 with that account's `CLAUDE_CONFIG_DIR`/`FLEET_ACCOUNT` (read from the process's actual
-environment), while a default-account pane is left running untouched · 4 kill -9 · 5 git worktrees + real remote · 6 polling scale ·
+environment), while a default-account pane is left running untouched · 3i focused-pane
+tracking: a real AppKit first-responder change is detected and Close Focused Pane
+(⌘⇧W) closes that actual pane, not always the last one · 4 kill -9 · 5 git worktrees + real remote · 6 polling scale ·
 7 clean quit · 7b close/shrink kills agents · 7d safe worktree cleanup ·
 7e window hide/summon/hotkey · 7c licensing (12 checks incl. live Dodo endpoint) · 8 UI.
 
@@ -104,6 +106,15 @@ again, `/tmp/fleet-7e-fail.log` holds the app log.
    reading from an unrelated session. Fixed: missing fields are now `null`,
    not `0`, and matching is by a real per-pane id (`FLEET_PANE_ID`) instead
    of directory.
+8. **"Remove Last Pane" (⌘⇧W) always removed whichever pane was literally
+   last**, never the one you were looking at, because Fleet never tracked
+   which pane actually had keyboard focus. Fixed with `checkFocusedPane()`
+   — reads AppKit's real first responder off the fleet window (looked up by
+   title, not `NSApp.keyWindow`, which is nil whenever Fleet isn't the
+   OS-level frontmost app — the exact case a headless test runs in, and the
+   bug that made this fix's own first version of section 3i fail before the
+   real cause was found) — and closes that pane via `closeFocusedPane`,
+   the same method the menu command now calls.
 
 ## What you should test by hand (needs real clicking)
 

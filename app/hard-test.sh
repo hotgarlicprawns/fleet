@@ -376,6 +376,39 @@ kill_app_tree
 pkill -f "sleep 80[01]" 2>/dev/null; true
 
 # ---------------------------------------------------------------------------
+section "3i. focused-pane tracking — Close Focused Pane closes the REAL one, not always the last"
+# focusedPaneID comes from AppKit's actual first responder (checkFocusedPane,
+# polled every 1s), not a guess. "focusPane" drives the exact same
+# makeFirstResponder call a real click does (via focusRequest); "closeFocused"
+# is the exact code path ⌘⇧W calls (closeFocusedPane). Two real, distinct PTYs.
+python3 - > "$APPJSON" <<PYEOF
+import json
+json.dump({"screens": [{"name": "focus", "panes": [
+    {"name": "first", "command": "sleep 802", "cwd": "/tmp", "autoNamed": False},
+    {"name": "second", "command": "sleep 803", "cwd": "/tmp", "autoNamed": False}
+]}], "power": "Display on"}, open('/dev/stdout', 'w'))
+PYEOF
+launch 6
+ctl() { printf '%s' "$1" > "$CFG_DIR/control.json"; sleep 2; }
+ctl '{"cmd":"focusPane","name":"focus","pane":"second"}'
+ctl '{"cmd":"dumpState"}'
+FOCUSED=$(python3 -c "import json; print(json.load(open('$CFG_DIR/state-dump.json')).get('focusedPaneName'))" 2>/dev/null)
+if [ "$FOCUSED" = "second" ]; then
+  pass "focusedPaneID tracks a REAL AppKit first-responder change to a non-first pane"
+else
+  fail "expected focusedPaneName 'second', got '$FOCUSED' — first-responder tracking not working"
+fi
+ctl '{"cmd":"closeFocused","name":"focus"}'
+REMAINING=$(python3 -c "import json; print([p['name'] for p in json.load(open('$APPJSON'))['screens'][0]['panes']])" 2>/dev/null)
+if [ "$REMAINING" = "['first']" ]; then
+  pass "Close Focused Pane closed 'second' (the actually-focused one), left 'first' running"
+else
+  fail "wrong pane closed — panes remaining: $REMAINING (expected only 'first')"
+fi
+kill_app_tree
+pkill -f "sleep 80[23]" 2>/dev/null; true
+
+# ---------------------------------------------------------------------------
 section "4. crash resilience (kill -9)"
 p=$(app_pid)
 kill -9 "$p" 2>/dev/null

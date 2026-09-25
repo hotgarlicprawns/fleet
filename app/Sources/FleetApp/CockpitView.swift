@@ -554,6 +554,8 @@ private struct PaneCell: View {
                     exitCode = code; exited = true
                 }, onTitle: { title in
                     store.autoName(pane: pane.id, in: screenID, title: title)
+                }, registerView: { view in
+                    if let view { store.paneViews[pane.id] = view } else { store.paneViews[pane.id] = nil }
                 })
                 // bump = fresh PTY; an account switch also restarts (a running
                 // process can't change which login it's using)

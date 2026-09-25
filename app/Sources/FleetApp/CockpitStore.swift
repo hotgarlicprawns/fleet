@@ -129,6 +129,15 @@ final class CockpitStore: ObservableObject {
     @Published var leanLive: (calls: Int, tokens: Int) = (0, 0)
     @Published var leanAllTime: (calls: Int, tokens: Int, days: Int)?
     @Published var focusRequest: UUID?
+    /// Which pane actually has keyboard focus right now, per AppKit's real
+    /// first responder — not assumed, not "whichever pane is last". Backs
+    /// ⌘⇧W ("Remove Last Pane" used to always mean literally last, which
+    /// was the actual bug behind it "removing the wrong pane"). Updated
+    /// from paneViews on the 1s controlTimer tick (see checkFocusedPane()).
+    @Published private(set) var focusedPaneID: UUID?
+    /// Weak-by-construction: entries are added in TerminalPane.makeNSView
+    /// and removed in dismantleNSView, so this never outlives the pane.
+    var paneViews: [UUID: NSView] = [:]
     /// screen id -> the pane maximized within it, if any. Transient (not
     /// persisted) — a fresh launch always starts with the normal grid.
     @Published var maximizedPane: [UUID: UUID] = [:]
@@ -173,7 +182,7 @@ final class CockpitStore: ObservableObject {
             Task { @MainActor in self?.revalidateLicense() }
         }
         controlTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.processControlFile() }
+            Task { @MainActor in self?.processControlFile(); self?.checkFocusedPane() }
         }
         NotificationCenter.default.addObserver(self, selector: #selector(screensParamsChanged),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
@@ -363,11 +372,22 @@ final class CockpitStore: ObservableObject {
     /// the actual bug behind "the minus button doesn't work": it worked, it
     /// just never closed the pane you wanted. A screen may end up with zero
     /// panes; ScreenGrid shows an "+ add pane" empty state for that screen.
+    /// Closes whichever pane has real keyboard focus (falls back to the
+    /// screen's last pane if nothing is focused yet). Shared by the
+    /// ⌘⇧W menu command and the test control file, so both exercise the
+    /// exact same code path.
+    func closeFocusedPane(in screenID: UUID) {
+        guard let s = screens.first(where: { $0.id == screenID }) else { return }
+        let target = s.panes.first(where: { $0.id == focusedPaneID }) ?? s.panes.last
+        if let target { closePane(target.id, in: screenID) }
+    }
+
     func closePane(_ id: UUID, in screenID: UUID) {
         guard let i = screens.firstIndex(where: { $0.id == screenID }) else { return }
         screens[i].panes.removeAll { $0.id == id }
         if maximizedPane[screenID] == id { maximizedPane[screenID] = nil }
         statByPane[id] = nil
+        if focusedPaneID == id { focusedPaneID = nil } // don't wait for the next poll tick
         persist()
     }
 
@@ -429,6 +449,26 @@ final class CockpitStore: ObservableObject {
         activeScreenID = screenID
         persist()
         focusRequest = s.panes.first(where: { !isLocked($0.id) })?.id
+    }
+
+    /// Reads AppKit's ACTUAL first responder (real state, not a guess) and
+    /// maps it back to whichever registered pane view contains it —
+    /// `firstResponder` for a terminal is a subview (SwiftTerm's inner text
+    /// view), so containment (`isDescendant(of:)`), not identity, is the
+    /// right test. A window with no matching responder (nothing focused
+    /// yet, or focus in a non-pane control) clears it rather than keeping a
+    /// stale pane "current" forever.
+    func checkFocusedPane() {
+        // NSApp.keyWindow is nil whenever Fleet isn't the OS-level frontmost
+        // app (true for a headless test run, and possible any time the user
+        // has another app focused) — but the fleet window's OWN first
+        // responder is still tracked internally by AppKit regardless, so
+        // look the window up by title (same pattern as Hotkey.summon,
+        // moveWindow, and the "performClose"/"windowState" control commands
+        // elsewhere in this file) instead of going through keyWindow.
+        guard let window = NSApp.windows.first(where: { $0.title == "fleet" }),
+              let responder = window.firstResponder as? NSView else { focusedPaneID = nil; return }
+        focusedPaneID = paneViews.first(where: { responder.isDescendant(of: $0.value) })?.key
     }
 
     func jumpToWaiting() {
@@ -573,6 +613,14 @@ final class CockpitStore: ObservableObject {
             if let s = screen, let paneName = o["pane"] as? String,
                let p = s.panes.first(where: { $0.name == paneName }) { closePane(p.id, in: s.id) }
         case "select": if let s = screen { select(s.id) }
+        case "focusPane":
+            // Test hook for real first-responder-based focus tracking: sets
+            // focusRequest directly (bypassing select(), which always picks
+            // the first pane) so a specific non-first pane gets a REAL
+            // makeFirstResponder call — see TerminalPane.updateNSView.
+            if let s = screen, let paneName = o["pane"] as? String,
+               let p = s.panes.first(where: { $0.name == paneName }) { focusRequest = p.id }
+        case "closeFocused": if let s = screen { closeFocusedPane(in: s.id) }
         case "performClose": NSApp.windows.first(where: { $0.title == "fleet" })?.performClose(nil)
         case "summon": Hotkey.summon()
         case "showUpgrade": upgradeReason = o["reason"] as? String ?? ""; showUpgrade = true
@@ -587,7 +635,8 @@ final class CockpitStore: ObservableObject {
                 "rateByAccount": rates,
                 "leanLiveCalls": leanLive.calls, "leanLiveTokens": leanLive.tokens,
                 "leanAllTimeCalls": leanAllTime?.calls ?? 0, "leanAllTimeTokens": leanAllTime?.tokens ?? 0,
-                "accounts": accounts.map { ["name": $0.name, "kind": $0.kind.rawValue, "configDir": $0.configDir] }
+                "accounts": accounts.map { ["name": $0.name, "kind": $0.kind.rawValue, "configDir": $0.configDir] },
+                "focusedPaneName": screens.flatMap { $0.panes }.first { $0.id == focusedPaneID }?.name as Any
             ]
             if let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted]) {
                 try? data.write(to: configDir.appendingPathComponent("state-dump.json"))

@@ -17,12 +17,17 @@ struct TerminalPane: NSViewRepresentable {
     /// one via this exact mechanism; verified directly against SwiftTerm's
     /// own escape-sequence handling with a raw OSC sequence, not assumed.
     var onTitle: @MainActor @Sendable (String) -> Void = { _ in }
+    /// Registers this pane's real NSView with CockpitStore.paneViews so
+    /// checkFocusedPane() can map AppKit's actual first responder back to a
+    /// pane id. Optional (tests/previews can omit it).
+    var registerView: @MainActor @Sendable (LocalProcessTerminalView?) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator(onExit: onExit, onTitle: onTitle) }
 
     func makeNSView(context: Context) -> LocalProcessTerminalView {
         context.coordinator.onExit = onExit
         context.coordinator.onTitle = onTitle
+        context.coordinator.registerView = registerView
         let term = LocalProcessTerminalView(frame: .zero)
         term.processDelegate = context.coordinator
         term.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -60,6 +65,7 @@ struct TerminalPane: NSViewRepresentable {
         term.startProcess(executable: shell,
                           args: ["-c", "cd '\(dir)' && \(cmd)"],
                           environment: env)
+        registerView(term)
         return term
     }
 
@@ -68,6 +74,7 @@ struct TerminalPane: NSViewRepresentable {
     /// shell — so killing only the shell would orphan it. The shell is its own
     /// session/process-group leader (forkpty), so signal the whole group.
     static func dismantleNSView(_ nsView: LocalProcessTerminalView, coordinator: Coordinator) {
+        coordinator.registerView?(nil)
         guard let pid = nsView.process?.shellPid, pid > 1 else { return }
         flog("dismantle: killing process group \(pid)")
         kill(-pid, SIGHUP)
@@ -78,6 +85,7 @@ struct TerminalPane: NSViewRepresentable {
     func updateNSView(_ nsView: LocalProcessTerminalView, context: Context) {
         context.coordinator.onExit = onExit
         context.coordinator.onTitle = onTitle
+        context.coordinator.registerView = registerView
         if focusRequest == pane.id {
             nsView.window?.makeFirstResponder(nsView)
             DispatchQueue.main.async { self.focusRequest = nil }
@@ -87,6 +95,7 @@ struct TerminalPane: NSViewRepresentable {
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
         var onExit: @MainActor @Sendable (Int32?) -> Void
         var onTitle: @MainActor @Sendable (String) -> Void
+        var registerView: (@MainActor @Sendable (LocalProcessTerminalView?) -> Void)?
         init(onExit: @escaping @MainActor @Sendable (Int32?) -> Void,
              onTitle: @escaping @MainActor @Sendable (String) -> Void) {
             self.onExit = onExit; self.onTitle = onTitle

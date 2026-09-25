@@ -45,13 +45,11 @@ struct FleetApp: App {
                 Button("Add Pane") {
                     if let s = store.activeScreen { store.setPaneCount(s.panes.count + 1, in: s.id) }
                 }.keyboardShortcut("t", modifiers: [.command])
-                Button("Remove Last Pane") {
-                    // TODO once focused-pane tracking exists (see PaneCell's
-                    // per-pane × for the general case): this should close
-                    // whichever pane has keyboard focus, not always the last
-                    // one. Routed through closePane (not setPaneCount) so it
-                    // gets the same maximizedPane/statByPane cleanup.
-                    if let s = store.activeScreen, let last = s.panes.last { store.closePane(last.id, in: s.id) }
+                Button("Close Focused Pane") {
+                    // Real focus tracking (CockpitStore.focusedPaneID, from
+                    // AppKit's actual first responder — see
+                    // checkFocusedPane()), not "whichever pane is last".
+                    if let s = store.activeScreen { store.closeFocusedPane(in: s.id) }
                 }.keyboardShortcut("w", modifiers: [.command, .shift])
             }
         }
