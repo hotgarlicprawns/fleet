@@ -9,7 +9,7 @@ Run the whole automated suite yourself any time:
 ./soak-test.sh &        # separate instance + config; see its header. `./soak-test.sh stop` ends it.
 ```
 
-Last full run: **65 passed, 0 failed, 1 skipped** (the skip is real UI automation, which
+Last full run: **68 passed, 0 failed, 1 skipped** (the skip is real UI automation, which
 needs Accessibility permission). The suite runs as an entitled "owner" except section 7c,
 which manages entitlement itself; it can't click, so it drives the app through a small
 control file (`$XDG_CONFIG_HOME/fleet/control.json`) — including a `dumpState` command that
@@ -28,7 +28,9 @@ is never overwritten · 3h multi-account: a pane switched to an extra account re
 with that account's `CLAUDE_CONFIG_DIR`/`FLEET_ACCOUNT` (read from the process's actual
 environment), while a default-account pane is left running untouched · 3i focused-pane
 tracking: a real AppKit first-responder change is detected and Close Focused Pane
-(⌘⇧W) closes that actual pane, not always the last one · 4 kill -9 · 5 git worktrees + real remote · 6 polling scale ·
+(⌘⇧W) closes that actual pane, not always the last one · 3j project›folder breadcrumb
+is derived from a screen's real repo/worktree/cwd fields, both git-backed and plain ·
+3k smart auto-blank settings persist through the real gated control path · 4 kill -9 · 5 git worktrees + real remote · 6 polling scale ·
 7 clean quit · 7b close/shrink kills agents · 7d safe worktree cleanup ·
 7e window hide/summon/hotkey · 7c licensing (12 checks incl. live Dodo endpoint) · 8 UI.
 
@@ -118,6 +120,14 @@ again, `/tmp/fleet-7e-fail.log` holds the app log.
 
 ## What you should test by hand (needs real clicking)
 
+- **"Blank Display Now" and smart auto-blank actually blanking/waking the
+  screen.** Deliberately not automated — the real `pmset displaysleepnow`
+  and `caffeinate -u` calls would blank whoever's screen runs the suite.
+  Section 3k proves the settings persist through the real gated control
+  path; `PowerManager.nextBlankState`'s decision logic and the
+  entitlement gate itself (same pattern section 7c already proves for the
+  free-tier pane cap) are the only parts with real risk of a bug, and
+  they have no I/O to isolate without a dedicated Swift test target.
 - **Rapid tab switching** while panes are mid-output — watch for dropped
   keystrokes or a pane that stops repainting.
 - **Resize the window** with 8–16 panes visible — check the grid re-tiles

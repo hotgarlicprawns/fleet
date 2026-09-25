@@ -22,6 +22,14 @@ struct SettingsView: View {
 private struct GeneralSettingsTab: View {
     @EnvironmentObject var store: CockpitStore
 
+    private var powerModeCaption: String {
+        switch store.powerMode {
+        case .displayOn: return "Native power assertion (no caffeinate) — the display stays on while sessions run."
+        case .systemOnly: return "Your Mac keeps working, but the display can sleep on its own — use Screen blanking below to control that explicitly instead."
+        case .off: return "No assertion held — your Mac's own sleep settings apply."
+        }
+    }
+
     private func shortDisplayName(_ d: DisplayInfo) -> String {
         var n = d.name
         n = n.replacingOccurrences(of: " Retina Display", with: "").replacingOccurrences(of: " Display", with: "")
@@ -37,7 +45,28 @@ private struct GeneralSettingsTab: View {
                     Spacer()
                     Segmented(options: PowerManager.Mode.allCases.map { ($0, $0.rawValue) }, selection: $store.powerMode)
                 }
-                Text("Native power assertion — no caffeinate, no screen blanking.")
+                Text(powerModeCaption)
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            Section("Screen blanking") {
+                HStack {
+                    Text("Blank the display")
+                    Spacer()
+                    FleetButton(title: "Now", systemImage: "moon.fill") { store.blankNow() }
+                        .help("pmset displaysleepnow — any key or mouse movement wakes it; arrangement untouched")
+                }
+                Toggle("Auto-blank after idle time (Pro)", isOn: Binding(
+                    get: { store.smartBlankEnabled },
+                    set: { store.smartBlankEnabled = $0 }
+                ))
+                if store.smartBlankEnabled {
+                    HStack {
+                        Text("Idle threshold")
+                        Spacer()
+                        Stepper("\(store.blankAfterMinutes) min", value: $store.blankAfterMinutes, in: 1...60)
+                    }
+                }
+                Text("Blanks automatically once you've been idle that long, and wakes the instant a session needs your input — same as `fleet watch` in the CLI.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             if !store.displays.isEmpty {

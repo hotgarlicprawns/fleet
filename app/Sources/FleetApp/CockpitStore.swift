@@ -76,6 +76,24 @@ struct Screen: Identifiable, Codable, Equatable {
 
     var isGitBacked: Bool { worktreePath != nil }
 
+    /// "project › folder" from this screen's REAL repo/worktree/cwd fields
+    /// — never a fabricated label. For a git-backed screen: the repo's own
+    /// folder name, and (if different — it usually is, since a worktree
+    /// dir is named after its branch) the worktree folder name. For a
+    /// plain screen: just the folder its panes actually run in.
+    var projectFolderCrumb: String? {
+        func base(_ p: String?) -> String? {
+            guard let p, !p.isEmpty else { return nil }
+            let trimmed = p.hasSuffix("/") ? String(p.dropLast()) : p
+            return (trimmed as NSString).lastPathComponent
+        }
+        if let repoPath, let project = base(repoPath) {
+            guard let folder = base(worktreePath), folder != project else { return project }
+            return "\(project) › \(folder)"
+        }
+        return base(panes.first?.cwd)
+    }
+
     enum CodingKeys: String, CodingKey { case id, name, repoPath, worktreePath, branch, baseBranch, panes }
 
     init(id: UUID = UUID(), name: String, repoPath: String? = nil, worktreePath: String? = nil,
@@ -122,6 +140,24 @@ final class CockpitStore: ObservableObject {
     }
     @Published var statByPane: [UUID: SessionStat] = [:]
     @Published var powerMode: PowerManager.Mode = .displayOn { didSet { power.apply(powerMode); persist() } }
+    /// Ports `fleet watch` (smart auto-blank): Pro-gated exactly like the
+    /// CLI. Setting it true when not entitled reverts itself and prompts
+    /// upgrade, rather than silently doing nothing.
+    @Published var smartBlankEnabled: Bool = false {
+        didSet {
+            guard smartBlankEnabled != oldValue else { return }
+            if smartBlankEnabled && !entitlement.isEntitled {
+                smartBlankEnabled = false
+                requireUpgrade("Smart auto-blank (fleet watch) is a Pro feature.")
+                return
+            }
+            smartBlankEnabled ? startSmartBlank() : stopSmartBlank()
+            persist()
+        }
+    }
+    @Published var blankAfterMinutes: Int = 10 { didSet { persist() } }
+    private var smartBlankTimer: Timer?
+    private var isBlanked = false
     @Published var displays: [DisplayInfo] = []
     @Published var pinnedDisplay: CGDirectDisplayID? { didSet { moveWindow(); persist() } }
     @Published var totalToday: Double = 0
@@ -197,6 +233,8 @@ final class CockpitStore: ObservableObject {
         var displayID: UInt32?
         var activeScreenID: UUID?
         var accounts: [Account]?
+        var smartBlankEnabled: Bool?
+        var blankAfterMinutes: Int?
     }
 
     private func homeExpand(_ p: String) -> String {
@@ -213,6 +251,8 @@ final class CockpitStore: ObservableObject {
             if let d = cfg.displayID { pinnedDisplay = d }
             activeScreenID = cfg.activeScreenID
             accounts = cfg.accounts ?? []
+            if let m = cfg.blankAfterMinutes { blankAfterMinutes = m }
+            if let b = cfg.smartBlankEnabled { smartBlankEnabled = b }
         }
         // Only seed a default screen when there was truly nothing configured
         // — no app.json at all, or one with neither `screens` nor `panes` —
@@ -255,7 +295,8 @@ final class CockpitStore: ObservableObject {
 
     func persist() {
         let cfg = AppConfig(screens: screens, panes: nil, power: powerMode.rawValue,
-                             displayID: pinnedDisplay, activeScreenID: activeScreenID, accounts: accounts)
+                             displayID: pinnedDisplay, activeScreenID: activeScreenID, accounts: accounts,
+                             smartBlankEnabled: smartBlankEnabled, blankAfterMinutes: blankAfterMinutes)
         try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
         if let data = try? JSONEncoder().encode(cfg) { try? data.write(to: appConfigURL) }
     }
@@ -621,6 +662,13 @@ final class CockpitStore: ObservableObject {
             if let s = screen, let paneName = o["pane"] as? String,
                let p = s.panes.first(where: { $0.name == paneName }) { focusRequest = p.id }
         case "closeFocused": if let s = screen { closeFocusedPane(in: s.id) }
+        case "setSmartBlank":
+            // Test hook: exercises the exact same gated property the
+            // Settings toggle/stepper use, without needing Accessibility
+            // to click them. Never triggers the real blankNow()/pmset call
+            // — that would actually blank whoever's screen runs this suite.
+            if let m = o["minutes"] as? Int { blankAfterMinutes = m }
+            if let e = o["enabled"] as? Bool { smartBlankEnabled = e }
         case "performClose": NSApp.windows.first(where: { $0.title == "fleet" })?.performClose(nil)
         case "summon": Hotkey.summon()
         case "showUpgrade": upgradeReason = o["reason"] as? String ?? ""; showUpgrade = true
@@ -636,7 +684,9 @@ final class CockpitStore: ObservableObject {
                 "leanLiveCalls": leanLive.calls, "leanLiveTokens": leanLive.tokens,
                 "leanAllTimeCalls": leanAllTime?.calls ?? 0, "leanAllTimeTokens": leanAllTime?.tokens ?? 0,
                 "accounts": accounts.map { ["name": $0.name, "kind": $0.kind.rawValue, "configDir": $0.configDir] },
-                "focusedPaneName": screens.flatMap { $0.panes }.first { $0.id == focusedPaneID }?.name as Any
+                "focusedPaneName": screens.flatMap { $0.panes }.first { $0.id == focusedPaneID }?.name as Any,
+                "activeScreenCrumb": activeScreen?.projectFolderCrumb as Any,
+                "smartBlankEnabled": smartBlankEnabled, "blankAfterMinutes": blankAfterMinutes
             ]
             if let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted]) {
                 try? data.write(to: configDir.appendingPathComponent("state-dump.json"))
@@ -751,6 +801,39 @@ final class CockpitStore: ObservableObject {
     }
 
     // MARK: HUD onboarding
+
+    // MARK: screen blanking (ports `fleet blank` / `fleet watch`)
+
+    /// Blanks the display right now — same as the CLI's `fleet blank`. Free,
+    /// no gating: only the automatic idle-triggered version below is Pro.
+    func blankNow() { PowerManager.blankNow() }
+
+    private func startSmartBlank() {
+        stopSmartBlank()
+        isBlanked = false
+        smartBlankTimer = Timer.scheduledTimer(withTimeInterval: 12, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.smartBlankTick() }
+        }
+    }
+
+    private func stopSmartBlank() {
+        smartBlankTimer?.invalidate()
+        smartBlankTimer = nil
+        isBlanked = false
+    }
+
+    /// Same 12s-tick state machine as `fleet watch`'s loop: idle time from
+    /// the real HIDIdleTime source, "anyone waiting" from Fleet's own
+    /// already-tracked pane state (no separate polling needed).
+    private func smartBlankTick() {
+        let anyWaiting = screens.contains { waitingCount($0) > 0 }
+        let idle = PowerManager.idleSeconds()
+        let threshold = Double(max(1, blankAfterMinutes) * 60)
+        let next = PowerManager.nextBlankState(blanked: isBlanked, idleSeconds: idle, anyWaiting: anyWaiting, thresholdSeconds: threshold)
+        guard next != isBlanked else { return }
+        if next { PowerManager.blankNow() } else { PowerManager.wakeNudge() }
+        isBlanked = next
+    }
 
     func installHUD() {
         _ = HUDManager.install()

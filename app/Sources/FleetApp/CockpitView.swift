@@ -106,6 +106,11 @@ struct CockpitView: View {
                 // screen name truncates first when space is tight — least costly to lose
                 Text(s.name).font(Theme.mono(12.5, .semibold)).foregroundStyle(Theme.ink)
                     .lineLimit(1).truncationMode(.tail).frame(maxWidth: 160, alignment: .leading)
+                if let crumb = s.projectFolderCrumb {
+                    Text(crumb).font(Theme.mono(10.5)).foregroundStyle(Theme.inkFaint)
+                        .lineLimit(1).truncationMode(.head).fixedSize()
+                        .help("Repo · working folder for this screen")
+                }
                 if s.isGitBacked { gitMenu(s) }
                 // A stepper here doubled up with per-pane × buttons in each
                 // header (its minus always removed whichever pane happened
