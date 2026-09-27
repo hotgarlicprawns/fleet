@@ -423,6 +423,16 @@ final class CockpitStore: ObservableObject {
         if let target { closePane(target.id, in: screenID) }
     }
 
+    /// Maximizes the focused pane, or restores the grid if a pane is
+    /// already maximized. Backs ⌘⇧↩.
+    func toggleMaximizeFocused(in screenID: UUID) {
+        if maximizedPane[screenID] != nil { maximizedPane[screenID] = nil; return }
+        guard let s = screens.first(where: { $0.id == screenID }),
+              let target = s.panes.first(where: { $0.id == focusedPaneID }) ?? s.panes.first else { return }
+        maximizedPane[screenID] = target.id
+        focusRequest = target.id
+    }
+
     func closePane(_ id: UUID, in screenID: UUID) {
         guard let i = screens.firstIndex(where: { $0.id == screenID }) else { return }
         screens[i].panes.removeAll { $0.id == id }
@@ -662,6 +672,12 @@ final class CockpitStore: ObservableObject {
             if let s = screen, let paneName = o["pane"] as? String,
                let p = s.panes.first(where: { $0.name == paneName }) { focusRequest = p.id }
         case "closeFocused": if let s = screen { closeFocusedPane(in: s.id) }
+        case "toggleMaximizeFocused": if let s = screen { toggleMaximizeFocused(in: s.id) }
+        case "maximize":
+            // same state the pane header's expand button toggles
+            if let s = screen {
+                maximizedPane[s.id] = (o["pane"] as? String).flatMap { n in s.panes.first { $0.name == n }?.id }
+            }
         case "setSmartBlank":
             // Test hook: exercises the exact same gated property the
             // Settings toggle/stepper use, without needing Accessibility
@@ -684,6 +700,21 @@ final class CockpitStore: ObservableObject {
                 "leanLiveCalls": leanLive.calls, "leanLiveTokens": leanLive.tokens,
                 "leanAllTimeCalls": leanAllTime?.calls ?? 0, "leanAllTimeTokens": leanAllTime?.tokens ?? 0,
                 "accounts": accounts.map { ["name": $0.name, "kind": $0.kind.rawValue, "configDir": $0.configDir] },
+                // Real AppKit frames (window coordinates) of every pane's terminal
+                // view, so tests can prove hidden panes don't overlap a maximized one.
+                // Built with plain assignment, NOT Dictionary(uniqueKeysWithValues:) —
+                // that traps with a fatal error the instant two panes share a name
+                // (e.g. two default-named "pane 0"s on different screens, which is
+                // completely ordinary), and did exactly that here: a real crash on
+                // every launch once any two panes anywhere shared a name. Caught by
+                // actually seeing the OS crash dialog while testing, not by reasoning
+                // about it — see hard-test.sh section 3l's regression check.
+                "paneFrames": screens.flatMap { $0.panes }.reduce(into: [String: [Double]]()) { dict, p in
+                    guard let v = paneViews[p.id] else { return }
+                    let r = v.convert(v.bounds, to: nil)
+                    dict[p.name] = [Double(r.minX), Double(r.minY), Double(r.width), Double(r.height)]
+                },
+                "maximizedPaneName": activeScreen.flatMap { s in s.panes.first { $0.id == maximizedPane[s.id] }?.name } as Any,
                 "focusedPaneName": screens.flatMap { $0.panes }.first { $0.id == focusedPaneID }?.name as Any,
                 "activeScreenCrumb": activeScreen?.projectFolderCrumb as Any,
                 "smartBlankEnabled": smartBlankEnabled, "blankAfterMinutes": blankAfterMinutes

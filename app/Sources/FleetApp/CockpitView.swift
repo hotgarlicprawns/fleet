@@ -431,6 +431,8 @@ private struct ScreenRow: View {
 /// count changed. A `Layout` container's subviews come from a single flat
 /// ForEach with stable identity; only their position/size changes when the
 /// grid reflows, never their identity, so this can't happen here.
+private struct MaximizedPaneKey: LayoutValueKey { static let defaultValue = false }
+
 private struct PaneGridLayout: Layout {
     static let gap: CGFloat = 1
 
@@ -444,29 +446,35 @@ private struct PaneGridLayout: Layout {
         proposal.replacingUnspecifiedDimensions()
     }
 
-    /// When set, every subview is proposed the FULL bounds — the maximized
-    /// one renders there; the others stay mounted (never unmounted, so their
-    /// agents keep running) but are made invisible/non-interactive by
-    /// PaneCell's own opacity/allowsHitTesting, the same pattern the
-    /// screens-switching ZStack already uses. Their exact placed frame
-    /// doesn't matter once hidden that way, so giving everyone the same
-    /// frame avoids needing a way to identify "which subview is which pane"
-    /// inside a Layout (no LayoutValueKey needed).
+    /// When set, the subview tagged with MaximizedPaneKey gets the full
+    /// bounds. The others stay mounted (their agents keep running) at their
+    /// normal cell size, but parked far outside the window. The previous
+    /// version gave every pane the full bounds and hid the rest with
+    /// opacity 0, but a terminal is an AppKit view, and SwiftUI's opacity
+    /// and allowsHitTesting don't stop an invisible NSView stacked on top
+    /// from taking mouse events. The hidden panes covered the maximized
+    /// pane's header, so its restore button couldn't be clicked. Keeping
+    /// their normal size also means restoring doesn't resize their PTYs.
     var isAnyMaximized: Bool = false
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         let n = subviews.count
         guard n > 0 else { return }
-        if isAnyMaximized {
-            for subview in subviews {
-                subview.place(at: CGPoint(x: bounds.midX, y: bounds.midY), anchor: .center,
-                               proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
-            }
-            return
-        }
         let (columns, rows) = Self.grid(for: n)
         let cellW = (bounds.width - Self.gap * CGFloat(columns - 1)) / CGFloat(columns)
         let cellH = (bounds.height - Self.gap * CGFloat(rows - 1)) / CGFloat(rows)
+        if isAnyMaximized {
+            for subview in subviews {
+                if subview[MaximizedPaneKey.self] {
+                    subview.place(at: CGPoint(x: bounds.midX, y: bounds.midY), anchor: .center,
+                                   proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
+                } else {
+                    subview.place(at: CGPoint(x: bounds.maxX + 20_000, y: bounds.midY), anchor: .center,
+                                   proposal: ProposedViewSize(width: cellW, height: cellH))
+                }
+            }
+            return
+        }
         for (index, subview) in subviews.enumerated() {
             let r = index / columns, c = index % columns
             let x = bounds.minX + CGFloat(c) * (cellW + Self.gap) + cellW / 2
@@ -501,8 +509,12 @@ private struct ScreenGrid: View {
 
     var body: some View {
         PaneGridLayout(isAnyMaximized: store.maximizedPane[screen.id] != nil) {
-            ForEach(screen.panes) { pane in PaneCell(pane: pane, screenID: screen.id) }
+            ForEach(screen.panes) { pane in
+                PaneCell(pane: pane, screenID: screen.id)
+                    .layoutValue(key: MaximizedPaneKey.self, value: store.maximizedPane[screen.id] == pane.id)
+            }
         }
+        .clipped()
         // Layout containers size to their content by default (like the old
         // GeometryReader-less VStack would have) — GeometryReader was doing
         // double duty as "take all available space," not just supplying a
@@ -570,7 +582,7 @@ private struct PaneCell: View {
         }
         .clipped()
         .overlay(Rectangle().stroke(stat?.attention == true ? Theme.accent : Theme.line,
-                                     lineWidth: stat?.attention == true ? 2 : 1))
+                                     lineWidth: stat?.attention == true ? 2 : 1).allowsHitTesting(false))
         // When a DIFFERENT pane in this screen is maximized, stay mounted
         // (agent keeps running) but go invisible/non-interactive — the same
         // pattern the screens ZStack uses for background screens.
@@ -635,14 +647,19 @@ private struct PaneCell: View {
                 Spacer()
                 if let m = stat?.model { Text(m).font(Theme.mono(10)).foregroundStyle(Theme.inkFaint) }
                 accountMenu
+                // The clickable area used to be the 9pt glyph alone, easy to
+                // miss by a pixel. A 22pt square hit target keeps the look.
                 Button { toggleMaximize() } label: {
                     Image(systemName: isMaximized ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                        .frame(width: 22, height: 22).contentShape(Rectangle())
                 }
-                .buttonStyle(.plain).font(.system(size: 9)).foregroundStyle(Theme.inkFaint)
-                .help(isMaximized ? "Restore" : "Maximize this pane")
-                Button { confirmClosePane() } label: { Image(systemName: "xmark") }
-                    .buttonStyle(.plain).font(.system(size: 9)).foregroundStyle(Theme.inkFaint)
-                    .help("Close this pane")
+                .buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(Theme.inkSoft)
+                .help(isMaximized ? "Restore (⌘⇧↩)" : "Maximize this pane (⌘⇧↩)")
+                Button { confirmClosePane() } label: {
+                    Image(systemName: "xmark").frame(width: 22, height: 22).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(Theme.inkSoft)
+                .help("Close this pane")
             }
             // Rate limits deliberately don't repeat here — they're
             // account-wide, so every pane on the same account showed the
@@ -659,7 +676,7 @@ private struct PaneCell: View {
                 }
             }
         }
-        .padding(.horizontal, 10).padding(.vertical, 6)
+        .padding(.horizontal, 10).padding(.vertical, 2)
         .background(Theme.panel)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -786,6 +803,8 @@ private struct NewScreenSheet: View {
     private func pickFolder() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true; panel.canChooseFiles = false
+        panel.canCreateDirectories = true   // "New Folder" button, so a fresh workspace can be made right here
+        panel.prompt = "Choose"
         if panel.runModal() == .OK, let url = panel.url { repoPath = url.path }
     }
     private func create() {

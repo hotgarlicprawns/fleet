@@ -484,6 +484,75 @@ kill_app_tree
 pkill -f "sleep 806" 2>/dev/null; true
 
 # ---------------------------------------------------------------------------
+section "3l. maximize — the maximized pane owns the area; hidden panes don't overlap it"
+# Reads each terminal's REAL AppKit frame (window coordinates) via dumpState.
+# The old layout gave every pane the full frame and hid the rest with opacity
+# 0; invisible NSViews still take mouse events, so they covered the maximized
+# pane's header and its restore button. This proves they no longer intersect.
+python3 - > "$APPJSON" <<PYEOF
+import json
+json.dump({"screens": [{"name": "mx", "panes": [
+    {"name": n, "command": "sleep 807", "cwd": "/tmp", "autoNamed": False} for n in ["A", "B", "C", "D"]
+]}], "power": "Display on"}, open('/dev/stdout', 'w'))
+PYEOF
+launch 6
+ctl() { printf '%s' "$1" > "$CFG_DIR/control.json"; sleep 2; }
+ctl '{"cmd":"focusPane","name":"mx","pane":"C"}'
+ctl '{"cmd":"toggleMaximizeFocused","name":"mx"}'
+sleep 1
+ctl '{"cmd":"dumpState"}'
+if python3 - "$CFG_DIR/state-dump.json" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d.get("maximizedPaneName") == "C", d.get("maximizedPaneName")
+f = d["paneFrames"]
+def inter(a, b):
+    return not (a[0] + a[2] <= b[0] or b[0] + b[2] <= a[0] or a[1] + a[3] <= b[1] or b[1] + b[3] <= a[1])
+c = f["C"]
+for n in "ABD":
+    assert not inter(c, f[n]), f"{n} {f[n]} overlaps maximized C {c}"
+assert c[2] > 800 and c[3] > 400, f"C not full-size: {c}"
+PYEOF
+then pass "⌘⇧↩ maximized the FOCUSED pane (C), full size, and no hidden pane's terminal overlaps it"
+else fail "maximize layout wrong — see $CFG_DIR/state-dump.json"; fi
+ctl '{"cmd":"toggleMaximizeFocused","name":"mx"}'
+sleep 1
+ctl '{"cmd":"dumpState"}'
+if python3 -c "import json,sys; d=json.load(open('$CFG_DIR/state-dump.json')); f=d['paneFrames']; sys.exit(0 if d.get('maximizedPaneName') is None and len({tuple(v) for v in f.values()})==4 and all(v[0]<3000 for v in f.values()) else 1)"; then
+  pass "restore brings back the 4-pane grid (4 distinct on-window frames)"
+else fail "restore didn't return to the grid — see $CFG_DIR/state-dump.json"; fi
+kill_app_tree
+pkill -f "sleep 807" 2>/dev/null; true
+
+# ---------------------------------------------------------------------------
+section "3m. dumpState must never crash on duplicate pane names (real regression)"
+# Found by actually seeing the OS "quit unexpectedly" dialog while testing
+# section 3l: dumpState's paneFrames used to build itself with
+# Dictionary(uniqueKeysWithValues:), which traps with a fatal error the
+# instant two panes anywhere share a name — completely ordinary (two
+# default-named "pane 0"s on different screens, or anyone naming two panes
+# the same thing on purpose). Two screens here share the pane name "dup" on
+# purpose.
+python3 - > "$APPJSON" <<PYEOF
+import json
+json.dump({"screens": [
+    {"name": "s1", "panes": [{"name": "dup", "command": "sleep 808", "cwd": "/tmp", "autoNamed": False}]},
+    {"name": "s2", "panes": [{"name": "dup", "command": "sleep 809", "cwd": "/tmp", "autoNamed": False}]}
+]}, open('/dev/stdout', 'w'))
+PYEOF
+launch 5
+ctl() { printf '%s' "$1" > "$CFG_DIR/control.json"; sleep 2; }
+ctl '{"cmd":"dumpState"}'
+if [ -n "$(app_pid)" ] && [ -f "$CFG_DIR/state-dump.json" ]; then
+  pass "dumpState survives two panes sharing a name — app still running, dump written"
+else
+  fail "app crashed or dumpState never wrote — see /tmp/fleet-hardtest-crash for a copy of any new crash report"
+  cp -f $(ls -t ~/Library/Logs/DiagnosticReports/Fleet-*.ips 2>/dev/null | head -1) /tmp/fleet-hardtest-crash.ips 2>/dev/null
+fi
+kill_app_tree
+pkill -f "sleep 80[89]" 2>/dev/null; true
+
+# ---------------------------------------------------------------------------
 section "4. crash resilience (kill -9)"
 p=$(app_pid)
 kill -9 "$p" 2>/dev/null

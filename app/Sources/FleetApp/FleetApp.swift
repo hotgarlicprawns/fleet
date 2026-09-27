@@ -51,6 +51,9 @@ struct FleetApp: App {
                     // checkFocusedPane()), not "whichever pane is last".
                     if let s = store.activeScreen { store.closeFocusedPane(in: s.id) }
                 }.keyboardShortcut("w", modifiers: [.command, .shift])
+                Button("Maximize / Restore Focused Pane") {
+                    if let s = store.activeScreen { store.toggleMaximizeFocused(in: s.id) }
+                }.keyboardShortcut(.return, modifiers: [.command, .shift])
             }
         }
 

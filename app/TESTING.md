@@ -9,7 +9,7 @@ Run the whole automated suite yourself any time:
 ./soak-test.sh &        # separate instance + config; see its header. `./soak-test.sh stop` ends it.
 ```
 
-Last full run: **68 passed, 0 failed, 1 skipped** (the skip is real UI automation, which
+Last full run: **71 passed, 0 failed, 1 skipped** (the skip is real UI automation, which
 needs Accessibility permission). The suite runs as an entitled "owner" except section 7c,
 which manages entitlement itself; it can't click, so it drives the app through a small
 control file (`$XDG_CONFIG_HOME/fleet/control.json`) — including a `dumpState` command that
@@ -30,7 +30,10 @@ environment), while a default-account pane is left running untouched · 3i focus
 tracking: a real AppKit first-responder change is detected and Close Focused Pane
 (⌘⇧W) closes that actual pane, not always the last one · 3j project›folder breadcrumb
 is derived from a screen's real repo/worktree/cwd fields, both git-backed and plain ·
-3k smart auto-blank settings persist through the real gated control path · 4 kill -9 · 5 git worktrees + real remote · 6 polling scale ·
+3k smart auto-blank settings persist through the real gated control path · 3l the
+maximized pane owns its full area and no hidden pane's real AppKit frame overlaps
+it (a real crash regression, see below) · 3m dumpState never crashes on two panes
+sharing a name · 4 kill -9 · 5 git worktrees + real remote · 6 polling scale ·
 7 clean quit · 7b close/shrink kills agents · 7d safe worktree cleanup ·
 7e window hide/summon/hotkey · 7c licensing (12 checks incl. live Dodo endpoint) · 8 UI.
 
@@ -117,6 +120,31 @@ again, `/tmp/fleet-7e-fail.log` holds the app log.
    bug that made this fix's own first version of section 3i fail before the
    real cause was found) — and closes that pane via `closeFocusedPane`,
    the same method the menu command now calls.
+9. **The maximize (expand) button on a pane didn't work.** The old layout
+   gave every pane — maximized or not — the FULL bounds, and hid the
+   inactive ones with SwiftUI opacity/`allowsHitTesting(false)`. A
+   terminal is a real AppKit `NSView`, and an invisible one stacked on top
+   still receives mouse events regardless of SwiftUI's hit-testing flag —
+   so the hidden panes' terminals sat directly over the maximized pane's
+   own header and silently ate every click meant for its restore button.
+   Fixed: `PaneGridLayout` now places the maximized pane at full size and
+   parks every other pane at its normal cell size far outside the visible
+   bounds (still mounted — agents keep running), so nothing can ever
+   overlap it. Also added a real ⌘⇧↩ shortcut and a header double-click as
+   two more ways in, since the tiny button alone was easy to miss.
+   **A fix for this introduced its own crash** (see #10) — found before
+   it ever reached a build anyone but this session used.
+10. **`dumpState`'s `paneFrames` field (added to verify #9) crashed the app
+    on every launch** the instant two panes anywhere shared a name — an
+    ordinary thing to happen (two default-named "pane 0"s on different
+    screens). `Dictionary(uniqueKeysWithValues:)` traps with a fatal error
+    on a duplicate key; switched to plain dictionary assignment, which
+    just lets the later pane's frame win instead of crashing. Caught by
+    actually seeing the real macOS "quit unexpectedly" crash dialog while
+    testing — not by reasoning about the code — and confirmed against the
+    real crash report (`EXC_BREAKPOINT` in `Dictionary.init(uniqueKeysWithValues:)`,
+    called from `processControlFile()`). Section 3m mutation-tests this:
+    reverting the fix reliably crashes the app again.
 
 ## What you should test by hand (needs real clicking)
 
